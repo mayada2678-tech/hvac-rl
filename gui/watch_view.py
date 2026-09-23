@@ -84,8 +84,12 @@ class WatchView(QWidget):
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
 
-        self.figure = Figure(figsize=(10, 10), constrained_layout=True)
+        self.figure = Figure(figsize=(10, 8), constrained_layout=True)
         self.canvas = FigureCanvas(self.figure)
+        # Mindesthöhe erzwingen: bei zu wenig Platz (kleines Fenster) würde Qt die Zeichenfläche
+        # sonst über die Lesbarkeit hinaus stauchen und Achsenbeschriftungen/Legende würden
+        # sich wieder überlappen — lieber im Zweifel scrollen als unleserlich werden.
+        self.canvas.setMinimumHeight(480)
         layout.addWidget(self.canvas, 1)
 
         layout.addWidget(QLabel('Kennzahlen (BOPTEST-KPIs auf der Testperiode):'))
@@ -207,11 +211,13 @@ class WatchView(QWidget):
         chosen = list(self._runs)
 
         self.figure.clear()
-        # Fünf Reihen statt einer kombinierten — SOC (0..1, dimensionslos) und Solarleistung
-        # (kW) auf eine gemeinsame Achse zu zwingen wäre irreführend (unterschiedliche
-        # Einheiten/Skalen), deshalb bekommt jede Größe ihre eigene Achse.
-        axes = self.figure.subplots(5, 1, sharex=True, height_ratios=[2.2, 1, 1, 1, 1])
-        ax_temp, ax_hp, ax_soc, ax_solar, ax_price = axes
+        # Vier Reihen, jede mit genau einer Einheit/Skala (nie zwei Skalen auf einer Achse):
+        # Wärmepumpe und Batterie-SOC sind beide dimensionslose 0..1-Größen und teilen sich
+        # deshalb legitim eine Achse, unterschieden per Linienstil statt Farbe (Farbe bleibt
+        # für die Strategie reserviert). Solar (kW) und Preis ($/kWh) bekommen je eine eigene
+        # Achse — sie zusammen auf eine Achse zu zwingen (Zwei-Skalen-Diagramm) wäre irreführend.
+        axes = self.figure.subplots(4, 1, sharex=True, height_ratios=[2.2, 1, 1, 1])
+        ax_temp, ax_hp, ax_solar, ax_price = axes
         first = next(iter(self._runs.values())).iloc[:upto]
 
         ax_temp.plot(first.t, first.setpoint_heat, color='#8a98a3', linestyle='--', lw=1, label='Sollwert Heizen')
@@ -223,8 +229,13 @@ class WatchView(QWidget):
             c = self._color(n, chosen)
             lw = 2.2 if len(chosen) == 1 or n == chosen[-1] else 1.3
             ax_temp.plot(d.t, d.indoor, color=c, lw=lw, label=n)
-            ax_hp.plot(d.t, d.heat_pump_action, color=c, lw=lw)
-            ax_soc.plot(d.t, d.battery_soc, color=c, lw=lw)
+            ax_hp.plot(d.t, d.heat_pump_action, color=c, lw=lw, linestyle='-')
+            ax_hp.plot(d.t, d.battery_soc, color=c, lw=max(1.0, lw - 0.6), linestyle='--')
+        # Referenz-Linienstile fürs Wärmepumpen-/SOC-Diagramm einmal neutral in der Legende
+        # erklären (Farbe = Strategie, Linienstil = Größe — zusammen macht das die Reihe
+        # eindeutig, ohne je Strategie zwei weitere Legendeneinträge zu brauchen).
+        ax_hp.plot([], [], color='#8a98a3', linestyle='-', lw=1.4, label='Wärmepumpe')
+        ax_hp.plot([], [], color='#8a98a3', linestyle='--', lw=1.4, label='Batterie-SOC')
 
         # Solarerzeugung und Preis hängen nur vom Wetter/Szenario ab, nicht von der gewählten
         # Strategie — deshalb je eine einzelne Linie statt je Strategie überlagert (eine
@@ -233,8 +244,7 @@ class WatchView(QWidget):
         ax_price.plot(first.t, first.price, color=PRICE_COLOR, lw=1.6)
 
         ax_temp.set_ylabel('Zone (°C)', fontsize=8)
-        ax_hp.set_ylabel('Wärmepumpe (0–1)', fontsize=8)
-        ax_soc.set_ylabel('Batterie-SOC (0–1)', fontsize=8)
+        ax_hp.set_ylabel('Wärmepumpe / SOC (0–1)', fontsize=8)
         ax_solar.set_ylabel('Solar (kW)', fontsize=8)
         ax_price.set_ylabel('Preis ($/kWh)', fontsize=8)
         ax_price.set_xlabel('Stunde der Testperiode')
@@ -242,12 +252,13 @@ class WatchView(QWidget):
             ax.tick_params(labelsize=7)
 
         # Eine gemeinsame Legende oberhalb aller Reihen statt mehrerer Einzel-Legenden, die
-        # sonst Datenlinien verdecken — deckt Referenzlinien (Sollwerte/Komfortband) und alle
-        # Strategiefarben ab, gilt sinngemäß auch für die Wärmepumpen-/SOC-Reihen darunter,
-        # die dieselbe Farbzuordnung je Strategie verwenden.
+        # sonst Datenlinien verdecken — deckt Referenzlinien (Sollwerte/Komfortband), alle
+        # Strategiefarben und die beiden Linienstile (Wärmepumpe/SOC) ab.
         handles, labels = ax_temp.get_legend_handles_labels()
+        h2, l2 = ax_hp.get_legend_handles_labels()
+        handles += h2[-2:]; labels += l2[-2:]   # nur die zwei neutralen Stil-Erklärungen dazu
         self.figure.legend(handles, labels, loc='outside upper center', fontsize=7,
-                           ncol=min(len(handles), 5), frameon=True)
+                           ncol=min(len(handles), 4), frameon=True)
         self.canvas.draw_idle()
 
         lines = []
