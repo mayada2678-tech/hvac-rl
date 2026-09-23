@@ -19,3 +19,4 @@ results/
 # Editor/OS
 .DS_Store
 Thumbs.db
+watch_preview*.png
