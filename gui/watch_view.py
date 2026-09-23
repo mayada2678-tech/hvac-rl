@@ -137,23 +137,41 @@ class WatchView(QWidget):
 
         self.status_label.setText('Simuliere Testperiode …')
         QApplication.setOverrideCursor(Qt.WaitCursor)
+        self._runs, self._kpis = {}, {}
+        errors = []
         try:
-            self._runs, self._kpis = {}, {}
             for n in chosen:
-                df, kpis = self._load(n)
-                self._runs[n] = df
-                self._kpis[n] = kpis
-        except requests.exceptions.RequestException:
-            self._runs, self._kpis = {}, {}
+                try:
+                    df, kpis = self._load(n)
+                    self._runs[n] = df
+                    self._kpis[n] = kpis
+                except requests.exceptions.RequestException:
+                    QApplication.restoreOverrideCursor()
+                    self.figure.clear()
+                    self.canvas.draw_idle()
+                    self.kpi_table.setRowCount(0)
+                    self.status_label.setText('⚠️ BOPTEST ist unter http://127.0.0.1:8000 nicht erreichbar. '
+                                              'Erst scripts\\start_boptest.ps1 ausführen (siehe README.md), '
+                                              'dann hier neu auswählen.')
+                    return
+                except Exception as e:
+                    # Häufigste Ursache: ein altes, mit einem inzwischen geänderten Environment
+                    # (anderer Beobachtungs-/Aktionsraum, z. B. nach Hinzufügen von Batterie/PV)
+                    # trainiertes Modell passt nicht mehr — nicht die ganze Ansicht abbrechen,
+                    # sondern nur diese eine Strategie überspringen und klar benennen, welche.
+                    errors.append(f'{n}: {e}')
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        if errors:
+            self.status_label.setText('⚠️ Nicht ladbar (vermutlich mit einem älteren Environment-Stand '
+                                      'trainiert, siehe workbench.md) — bitte neu trainieren oder aus '
+                                      'models/ entfernen: ' + '; '.join(errors))
+        if not self._runs:
             self.figure.clear()
             self.canvas.draw_idle()
             self.kpi_table.setRowCount(0)
-            self.status_label.setText('⚠️ BOPTEST ist unter http://127.0.0.1:8000 nicht erreichbar. '
-                                      'Erst scripts\\start_boptest.ps1 ausführen (siehe README.md), '
-                                      'dann hier neu auswählen.')
             return
-        finally:
-            QApplication.restoreOverrideCursor()
 
         n_hours = len(next(iter(self._runs.values())))
         self.hour_slider.blockSignals(True)
@@ -183,7 +201,7 @@ class WatchView(QWidget):
         chosen = list(self._runs)
 
         self.figure.clear()
-        axes = self.figure.subplots(3, 1, sharex=True)
+        axes = self.figure.subplots(4, 1, sharex=True)
         first = next(iter(self._runs.values())).iloc[:upto]
         axes[0].plot(first.t, first.setpoint_heat, 'k--', lw=1, label='Sollwert Heizen')
         axes[0].plot(first.t, first.setpoint_cool, 'k:', lw=1, label='Sollwert Kühlen')
@@ -194,14 +212,20 @@ class WatchView(QWidget):
             c = self._color(n, chosen)
             lw = 2.2 if len(chosen) == 1 or n == chosen[-1] else 1.3
             axes[0].plot(d.t, d.indoor, color=c, lw=lw, label=n)
-            axes[1].plot(d.t, d.action, color=c, lw=lw)
+            axes[1].plot(d.t, d.heat_pump_action, color=c, lw=lw)
+            axes[2].plot(d.t, d.battery_soc, color=c, lw=lw, linestyle='--', label=f'{n}: SOC' if n == chosen[0] else None)
             if n == chosen[0]:
-                axes[2].plot(d.t, d.price, color='#9d9d9d', lw=1.5)
+                # Solarerzeugung und Preis hängen nur vom Wetter/Szenario ab, nicht von der
+                # Strategie — deshalb einmal reicht, statt je Strategie zu überlagern.
+                axes[2].plot(d.t, d.solar_power, color='#DCDCAA', lw=1.3, label='Solarerzeugung (kW)')
+                axes[3].plot(d.t, d.price, color='#9d9d9d', lw=1.5)
 
         axes[0].set_ylabel('Zonentemperatur (°C)', fontsize=8)
         axes[0].legend(fontsize=7, ncol=3)
         axes[1].set_ylabel('Wärmepumpe (0–1)', fontsize=8)
-        axes[2].set_ylabel('Strompreis', fontsize=8)
+        axes[2].set_ylabel('Batterie-SOC / Solar (kW)', fontsize=8)
+        axes[2].legend(fontsize=6, ncol=2)
+        axes[3].set_ylabel('Strompreis', fontsize=8)
         axes[-1].set_xlabel('Stunde der Testperiode')
         self.canvas.draw_idle()
 
@@ -209,10 +233,12 @@ class WatchView(QWidget):
         for n in chosen:
             r = self._runs[n].iloc[upto - 1]
             inside = r.setpoint_heat <= r.indoor <= r.setpoint_cool
-            lines.append(f"{n}: {r.indoor:.1f}°C · Wärmepumpe {r.action:.2f} · "
+            lines.append(f"{n}: {r.indoor:.1f}°C · Wärmepumpe {r.heat_pump_action:.2f} · "
+                        f"Batterie {r.battery_power:+.1f} kW (SOC {r.battery_soc:.2f}) · "
                         + ('im Band' if inside else 'außerhalb Band'))
         r0 = first.iloc[-1]
-        self.status_label.setText(f"Stunde {int(r0.hour):02d}:00 — " + '   |   '.join(lines))
+        self.status_label.setText(f"Stunde {int(r0.hour):02d}:00 — Solar {r0.solar_power:.2f} kW — "
+                                  + '   |   '.join(lines))
 
     def _update_kpis(self):
         names = list(self._kpis)
