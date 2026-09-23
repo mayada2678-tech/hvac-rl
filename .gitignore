@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtuelle Umgebungen
+.venv/
+.venv-1/
+.venv311/
+
+# Trainingsartefakte (werden durch Training/Beobachten selbst erzeugt, siehe README.md)
+models/
+runs/
+results/
+
+# Streamlit/lokale Logs, falls vorhanden
+*.log
+
+# Editor/OS
+.DS_Store
+Thumbs.db

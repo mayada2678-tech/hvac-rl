@@ -1,0 +1,7 @@
+algo: SAC
+total_timesteps: 20000
+eval_freq: 2000
+# Komfortgewicht der BOPTEST-Belohnung (Kosten + w_comfort * Komfort-Defizit), siehe
+# logic/boptest_gym_env.py::HVACReward.
+reward: {w_comfort: 1.0}
+params: {learning_rate: 0.0003, batch_size: 256, gamma: 0.99, buffer_size: 20000, train_freq: 4, gradient_steps: 4}

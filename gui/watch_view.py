@@ -1,0 +1,228 @@
+"""Qt-Baustein "Beobachten": Stunde-für-Stunde-Animation der Testperiode (3 Tage im Februar,
+siehe logic/envs.py) — Zonentemperatur vs. Komfortband, Wärmepumpen-Modulation, dynamischer
+Strompreis. Strategien: BOPTESTs eingebauter Regler (RBC) und beliebig viele trainierte
+Modelle, zum direkten Vergleich.
+"""
+from pathlib import Path
+
+import pandas as pd
+import requests
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QHBoxLayout, QLabel, QListWidget,
+                               QListWidgetItem, QPushButton, QSlider, QTableWidget,
+                               QTableWidgetItem, QVBoxLayout, QWidget)
+from stable_baselines3 import PPO, SAC, TD3
+
+from logic.watch import record
+
+ALGOS = {'sac': SAC, 'td3': TD3, 'ppo': PPO}
+COLORS = {'Regel (RBC)': '#DCDCAA'}
+AGENT_COLOR = '#4FC1FF'
+AGENT_PALETTE = ['#4FC1FF', '#4EC9B0', '#F48771', '#C586C0', '#B5CEA8']
+
+KPI_LABELS = {
+    'cost_tot': 'Kosten (€ bzw. $/m²)', 'tdis_tot': 'Komfort-Defizit (Kh/m²)',
+    'idis_tot': 'Unbehaglichkeits-Index', 'ener_tot': 'Energie (kWh/m²)',
+    'emis_tot': 'CO2-Emissionen (kg/m²)', 'time_rat': 'Rechenzeit-Verhältnis',
+}
+
+
+class WatchView(QWidget):
+    """Strategien wählen (RBC + trainierte Modelle), die Testperiode abspielen oder per
+    Regler durchblättern."""
+
+    def __init__(self, models_dir: Path, parent=None):
+        super().__init__(parent)
+        self.models_dir = Path(models_dir)
+        self._cache: dict[tuple[str, float], tuple[pd.DataFrame, dict]] = {}
+        self._runs: dict[str, pd.DataFrame] = {}
+        self._kpis: dict[str, dict] = {}
+        self._build_ui()
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._advance)
+        self.reload_models()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        top = QHBoxLayout()
+        self.strategy_list = QListWidget()
+        self.strategy_list.setSelectionMode(QAbstractItemView.MultiSelection)
+        self.strategy_list.setMaximumHeight(90)
+        self.strategy_list.itemSelectionChanged.connect(self._on_selection_changed)
+        top.addWidget(QLabel('Strategien:'))
+        top.addWidget(self.strategy_list, 1)
+        self.reload_btn = QPushButton('⟳ Modelle neu laden')
+        self.reload_btn.clicked.connect(self.reload_models)
+        top.addWidget(self.reload_btn)
+        layout.addLayout(top)
+
+        controls = QHBoxLayout()
+        self.play_btn = QPushButton('▶ Abspielen')
+        self.play_btn.setCheckable(True)
+        self.play_btn.toggled.connect(self._on_play_toggled)
+        self.hour_slider = QSlider(Qt.Horizontal)
+        self.hour_slider.valueChanged.connect(self._redraw)
+        self.speed_slider = QSlider(Qt.Horizontal)
+        self.speed_slider.setRange(50, 1000)
+        self.speed_slider.setValue(250)
+        self.speed_slider.setMaximumWidth(120)
+        controls.addWidget(self.play_btn)
+        controls.addWidget(self.hour_slider, 1)
+        controls.addWidget(QLabel('Tempo:'))
+        controls.addWidget(self.speed_slider)
+        layout.addLayout(controls)
+
+        self.status_label = QLabel()
+        self.status_label.setWordWrap(True)
+        layout.addWidget(self.status_label)
+
+        self.figure = Figure(figsize=(10, 7), constrained_layout=True)
+        self.canvas = FigureCanvas(self.figure)
+        layout.addWidget(self.canvas, 1)
+
+        layout.addWidget(QLabel('Kennzahlen (BOPTEST-KPIs auf der Testperiode):'))
+        self.kpi_table = QTableWidget()
+        self.kpi_table.setMaximumHeight(120)
+        layout.addWidget(self.kpi_table)
+
+    def reload_models(self):
+        """Neu einlesen, z. B. nachdem ein Training gerade ein Modell gesichert hat."""
+        models = sorted(p.stem for p in self.models_dir.glob('*.zip')) if self.models_dir.exists() else []
+        previously = {i.text() for i in self.strategy_list.selectedItems()}
+        self.strategy_list.blockSignals(True)
+        self.strategy_list.clear()
+        for name in ['Regel (RBC)'] + models:
+            self.strategy_list.addItem(QListWidgetItem(name))
+        defaults = previously or ({'Regel (RBC)'} | set(models[-1:]))
+        for i in range(self.strategy_list.count()):
+            item = self.strategy_list.item(i)
+            item.setSelected(item.text() in defaults)
+        self.strategy_list.blockSignals(False)
+        self._on_selection_changed()
+
+    def _load(self, name: str) -> tuple[pd.DataFrame, dict]:
+        mtime = 0.0
+        if name != 'Regel (RBC)':
+            path = self.models_dir / f'{name}.zip'
+            mtime = path.stat().st_mtime if path.exists() else 0.0
+        key = (name, mtime)
+        if key in self._cache:
+            return self._cache[key]
+        if name == 'Regel (RBC)':
+            result = record('rbc')
+        else:
+            result = record(ALGOS[name.split('_')[0]].load(str(self.models_dir / name)))
+        self._cache[key] = result
+        return result
+
+    def _color(self, name: str, chosen: list[str]) -> str:
+        if name in COLORS:
+            return COLORS[name]
+        agents = [n for n in chosen if n not in COLORS]
+        return AGENT_PALETTE[agents.index(name) % len(AGENT_PALETTE)] if name in agents else AGENT_COLOR
+
+    def _on_selection_changed(self):
+        self.timer.stop()
+        self.play_btn.setChecked(False)
+        chosen = [i.text() for i in self.strategy_list.selectedItems()]
+        if not chosen:
+            self._runs, self._kpis = {}, {}
+            self.figure.clear()
+            self.canvas.draw_idle()
+            self.kpi_table.setRowCount(0)
+            self.status_label.setText('Mindestens eine Strategie auswählen.')
+            return
+
+        self.status_label.setText('Simuliere Testperiode …')
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            self._runs, self._kpis = {}, {}
+            for n in chosen:
+                df, kpis = self._load(n)
+                self._runs[n] = df
+                self._kpis[n] = kpis
+        except requests.exceptions.RequestException:
+            self._runs, self._kpis = {}, {}
+            self.figure.clear()
+            self.canvas.draw_idle()
+            self.kpi_table.setRowCount(0)
+            self.status_label.setText('⚠️ BOPTEST ist unter http://127.0.0.1:8000 nicht erreichbar. '
+                                      'Erst scripts\\start_boptest.ps1 ausführen (siehe README.md), '
+                                      'dann hier neu auswählen.')
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        n_hours = len(next(iter(self._runs.values())))
+        self.hour_slider.blockSignals(True)
+        self.hour_slider.setRange(1, max(1, n_hours))
+        self.hour_slider.setValue(n_hours)
+        self.hour_slider.blockSignals(False)
+        self._redraw()
+        self._update_kpis()
+
+    def _on_play_toggled(self, checked):
+        if checked:
+            self.play_btn.setText('⏸ Pause')
+            self.timer.start(self.speed_slider.value())
+        else:
+            self.play_btn.setText('▶ Abspielen')
+            self.timer.stop()
+
+    def _advance(self):
+        h, n = self.hour_slider.value(), self.hour_slider.maximum()
+        self.hour_slider.setValue(1 if h >= n else h + 1)
+
+    def _redraw(self):
+        if not self._runs:
+            return
+        self.timer.setInterval(self.speed_slider.value())
+        upto = self.hour_slider.value()
+        chosen = list(self._runs)
+
+        self.figure.clear()
+        axes = self.figure.subplots(3, 1, sharex=True)
+        first = next(iter(self._runs.values())).iloc[:upto]
+        axes[0].plot(first.t, first.setpoint_heat, 'k--', lw=1, label='Sollwert Heizen')
+        axes[0].plot(first.t, first.setpoint_cool, 'k:', lw=1, label='Sollwert Kühlen')
+        axes[0].fill_between(first.t, first.setpoint_heat, first.setpoint_cool, color='k', alpha=.06,
+                             label='Komfortband')
+        for n in chosen:
+            d = self._runs[n].iloc[:upto]
+            c = self._color(n, chosen)
+            lw = 2.2 if len(chosen) == 1 or n == chosen[-1] else 1.3
+            axes[0].plot(d.t, d.indoor, color=c, lw=lw, label=n)
+            axes[1].plot(d.t, d.action, color=c, lw=lw)
+            if n == chosen[0]:
+                axes[2].plot(d.t, d.price, color='#9d9d9d', lw=1.5)
+
+        axes[0].set_ylabel('Zonentemperatur (°C)', fontsize=8)
+        axes[0].legend(fontsize=7, ncol=3)
+        axes[1].set_ylabel('Wärmepumpe (0–1)', fontsize=8)
+        axes[2].set_ylabel('Strompreis', fontsize=8)
+        axes[-1].set_xlabel('Stunde der Testperiode')
+        self.canvas.draw_idle()
+
+        lines = []
+        for n in chosen:
+            r = self._runs[n].iloc[upto - 1]
+            inside = r.setpoint_heat <= r.indoor <= r.setpoint_cool
+            lines.append(f"{n}: {r.indoor:.1f}°C · Wärmepumpe {r.action:.2f} · "
+                        + ('im Band' if inside else 'außerhalb Band'))
+        r0 = first.iloc[-1]
+        self.status_label.setText(f"Stunde {int(r0.hour):02d}:00 — " + '   |   '.join(lines))
+
+    def _update_kpis(self):
+        names = list(self._kpis)
+        keys = [k for k in KPI_LABELS if all(k in self._kpis[n] for n in names)]
+        self.kpi_table.setRowCount(len(names))
+        self.kpi_table.setColumnCount(len(keys))
+        self.kpi_table.setHorizontalHeaderLabels([KPI_LABELS[k] for k in keys])
+        self.kpi_table.setVerticalHeaderLabels(names)
+        for i, n in enumerate(names):
+            for j, k in enumerate(keys):
+                v = self._kpis[n][k]
+                self.kpi_table.setItem(i, j, QTableWidgetItem(f'{v:.4f}' if v is not None else '—'))
+        self.kpi_table.resizeColumnsToContents()
