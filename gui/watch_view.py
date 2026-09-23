@@ -18,9 +18,15 @@ from stable_baselines3 import PPO, SAC, TD3
 from logic.watch import record
 
 ALGOS = {'sac': SAC, 'td3': TD3, 'ppo': PPO}
+# Feste Farbzuordnung je Strategie (kategorial, nach Auswahlreihenfolge vergeben, nie nach
+# Rang neu eingefärbt) — Solar/Preis bekommen eigene, hiervon garantiert verschiedene Farben,
+# damit z. B. "Regel (RBC)" und "Solarerzeugung" nicht (wie zuvor) versehentlich dieselbe
+# Farbe teilen und ununterscheidbar werden.
 COLORS = {'Regel (RBC)': '#DCDCAA'}
 AGENT_COLOR = '#4FC1FF'
 AGENT_PALETTE = ['#4FC1FF', '#4EC9B0', '#F48771', '#C586C0', '#B5CEA8']
+SOLAR_COLOR = '#D7BA7D'
+PRICE_COLOR = '#9d9d9d'
 
 KPI_LABELS = {
     'cost_tot': 'Kosten (€ bzw. $/m²)', 'tdis_tot': 'Komfort-Defizit (Kh/m²)',
@@ -78,7 +84,7 @@ class WatchView(QWidget):
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
 
-        self.figure = Figure(figsize=(10, 7), constrained_layout=True)
+        self.figure = Figure(figsize=(10, 10), constrained_layout=True)
         self.canvas = FigureCanvas(self.figure)
         layout.addWidget(self.canvas, 1)
 
@@ -201,32 +207,47 @@ class WatchView(QWidget):
         chosen = list(self._runs)
 
         self.figure.clear()
-        axes = self.figure.subplots(4, 1, sharex=True)
+        # Fünf Reihen statt einer kombinierten — SOC (0..1, dimensionslos) und Solarleistung
+        # (kW) auf eine gemeinsame Achse zu zwingen wäre irreführend (unterschiedliche
+        # Einheiten/Skalen), deshalb bekommt jede Größe ihre eigene Achse.
+        axes = self.figure.subplots(5, 1, sharex=True, height_ratios=[2.2, 1, 1, 1, 1])
+        ax_temp, ax_hp, ax_soc, ax_solar, ax_price = axes
         first = next(iter(self._runs.values())).iloc[:upto]
-        axes[0].plot(first.t, first.setpoint_heat, 'k--', lw=1, label='Sollwert Heizen')
-        axes[0].plot(first.t, first.setpoint_cool, 'k:', lw=1, label='Sollwert Kühlen')
-        axes[0].fill_between(first.t, first.setpoint_heat, first.setpoint_cool, color='k', alpha=.06,
+
+        ax_temp.plot(first.t, first.setpoint_heat, color='#8a98a3', linestyle='--', lw=1, label='Sollwert Heizen')
+        ax_temp.plot(first.t, first.setpoint_cool, color='#8a98a3', linestyle=':', lw=1, label='Sollwert Kühlen')
+        ax_temp.fill_between(first.t, first.setpoint_heat, first.setpoint_cool, color='#8a98a3', alpha=.12,
                              label='Komfortband')
         for n in chosen:
             d = self._runs[n].iloc[:upto]
             c = self._color(n, chosen)
             lw = 2.2 if len(chosen) == 1 or n == chosen[-1] else 1.3
-            axes[0].plot(d.t, d.indoor, color=c, lw=lw, label=n)
-            axes[1].plot(d.t, d.heat_pump_action, color=c, lw=lw)
-            axes[2].plot(d.t, d.battery_soc, color=c, lw=lw, linestyle='--', label=f'{n}: SOC' if n == chosen[0] else None)
-            if n == chosen[0]:
-                # Solarerzeugung und Preis hängen nur vom Wetter/Szenario ab, nicht von der
-                # Strategie — deshalb einmal reicht, statt je Strategie zu überlagern.
-                axes[2].plot(d.t, d.solar_power, color='#DCDCAA', lw=1.3, label='Solarerzeugung (kW)')
-                axes[3].plot(d.t, d.price, color='#9d9d9d', lw=1.5)
+            ax_temp.plot(d.t, d.indoor, color=c, lw=lw, label=n)
+            ax_hp.plot(d.t, d.heat_pump_action, color=c, lw=lw)
+            ax_soc.plot(d.t, d.battery_soc, color=c, lw=lw)
 
-        axes[0].set_ylabel('Zonentemperatur (°C)', fontsize=8)
-        axes[0].legend(fontsize=7, ncol=3)
-        axes[1].set_ylabel('Wärmepumpe (0–1)', fontsize=8)
-        axes[2].set_ylabel('Batterie-SOC / Solar (kW)', fontsize=8)
-        axes[2].legend(fontsize=6, ncol=2)
-        axes[3].set_ylabel('Strompreis', fontsize=8)
-        axes[-1].set_xlabel('Stunde der Testperiode')
+        # Solarerzeugung und Preis hängen nur vom Wetter/Szenario ab, nicht von der gewählten
+        # Strategie — deshalb je eine einzelne Linie statt je Strategie überlagert (eine
+        # Datenreihe braucht laut Diagramm-Richtlinie keine eigene Legende, der Achsentitel reicht).
+        ax_solar.plot(first.t, first.solar_power, color=SOLAR_COLOR, lw=1.6)
+        ax_price.plot(first.t, first.price, color=PRICE_COLOR, lw=1.6)
+
+        ax_temp.set_ylabel('Zone (°C)', fontsize=8)
+        ax_hp.set_ylabel('Wärmepumpe (0–1)', fontsize=8)
+        ax_soc.set_ylabel('Batterie-SOC (0–1)', fontsize=8)
+        ax_solar.set_ylabel('Solar (kW)', fontsize=8)
+        ax_price.set_ylabel('Preis ($/kWh)', fontsize=8)
+        ax_price.set_xlabel('Stunde der Testperiode')
+        for ax in axes:
+            ax.tick_params(labelsize=7)
+
+        # Eine gemeinsame Legende oberhalb aller Reihen statt mehrerer Einzel-Legenden, die
+        # sonst Datenlinien verdecken — deckt Referenzlinien (Sollwerte/Komfortband) und alle
+        # Strategiefarben ab, gilt sinngemäß auch für die Wärmepumpen-/SOC-Reihen darunter,
+        # die dieselbe Farbzuordnung je Strategie verwenden.
+        handles, labels = ax_temp.get_legend_handles_labels()
+        self.figure.legend(handles, labels, loc='outside upper center', fontsize=7,
+                           ncol=min(len(handles), 5), frameon=True)
         self.canvas.draw_idle()
 
         lines = []
