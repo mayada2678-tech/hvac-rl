@@ -1,11 +1,15 @@
 # HVAC-RL — BOPTEST
 
-Ein Reinforcement-Learning-Agent (SAC, alternativ PPO/TD3) lernt, eine Wärmepumpe so zu
-steuern, dass er bei **dynamischem Strompreis** Kosten spart, ohne den **thermischen
-Komfort** zu verletzen — auf [BOPTEST](https://github.com/ibpsa/project1-boptest)
+Ein Reinforcement-Learning-Agent (SAC, alternativ PPO/TD3) lernt, eine Wärmepumpe **und**
+einen Batteriespeicher so zu steuern, dass er bei **dynamischem Strompreis** Kosten spart,
+ohne den **thermischen Komfort** zu verletzen — auf [BOPTEST](https://github.com/ibpsa/project1-boptest)
 (Testfall `bestest_hydronic_heat_pump`: Einzonen-Wohngebäude mit Wärmepumpe und
-Fußbodenheizung). Vergleich am Ende: der trainierte Agent gegen BOPTESTs eingebauten
-Rule-Based Controller (RBC), auf derselben, nie im Training gesehenen Testperiode.
+Fußbodenheizung). Batterie und eine PV-Anlage gibt es im BOPTEST-Testfall selbst nicht —
+beide kommen als eigenständige Python-Schicht obendrauf (`logic/battery_env.py`,
+`logic/solar_env.py`), die den Netzbezug und damit die Kosten senken, wenn sie genutzt
+werden — Details in [workbench.md](workbench.md). Vergleich am Ende: der trainierte Agent
+gegen BOPTESTs eingebauten Rule-Based Controller (RBC), auf derselben, nie im Training
+gesehenen Testperiode.
 
 ## Voraussetzungen
 
@@ -82,8 +86,10 @@ scripts/                   start_boptest.ps1 / stop_boptest.ps1
 logic/
 ├── boptest_gym_env.py         Gymnasium-Umgebung für BOPTEST (REST-Client), Drittanbieter-
 │                              Ursprung siehe THIRD_PARTY_NOTICES.md
-├── envs.py                     Testfall-Auswahl, Beobachtungen/Aktionen, train/test-Split
-├── baselines.py                  RBC-Baseline = BOPTESTs eingebauter Regler
+├── battery_env.py               Batterie als eigener Wrapper (Ladezustand, 2. Aktion, Kosten)
+├── solar_env.py                   PV-Anlage als eigener Wrapper (Erzeugung, Kosten)
+├── envs.py                          Testfall-Auswahl, Beobachtungen/Aktionen, train/test-Split
+├── baselines.py                       RBC-Baseline = BOPTESTs eingebauter Regler
 ├── watch.py                       Eine Testepisode aufzeichnen (für Live-Beobachtung)
 ├── training.py                    Trainings-Kernlogik (CLI + Oberfläche, eine train()-Funktion)
 ├── live_control.py                 Hyperparameter-Empfehlungen, Dateisteuerung (Pause/Stopp)

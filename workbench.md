@@ -54,19 +54,76 @@ auch SAC+PPO+TD3 gleichzeitig (je 2 Worker) laufen können, wie es die Oberfläc
 
 ## Belohnung: Kosten + Komfort
 
-`logic/boptest_gym_env.py::HVACReward` (Unterklasse von `BoptestGymEnv`) berechnet die
-Belohnung als negierten Anstieg von
+`logic/envs.py::make_env()` baut standardmäßig einen Wrapper-Stapel:
+`SolarEnv(BatteryEnv(BoptestGymEnv(...)))`. Die Belohnung entsteht dabei nicht mehr direkt in
+der BOPTEST-Anbindung (`BoptestGymEnv.get_reward()`/`HVACReward`, die weiterhin existieren und
+für eine reine Wärmepumpen-Umgebung *ohne* Batterie/PV nutzbar bleiben, z. B. mit
+`battery=False, solar=False` in `make_env()`), sondern in `BatteryEnv` — als negierter Anstieg
+von
 
 ```
-Zielfunktion = cost_tot + w_comfort * tdis_tot
+Zielfunktion = eigene_Kosten + w_comfort * tdis_tot
 ```
 
-`cost_tot` und `tdis_tot` sind BOPTESTs eigene, offiziell definierte KPIs (Betriebskosten
-zum dynamischen Strompreis bzw. integriertes Komfort-Defizit in Kelvin-Stunden) — nicht
-selbst nachgerechnet, sondern direkt von der BOPTEST-API abgefragt (`GET /kpi/{testid}`).
-Das stellt sicher, dass die Belohnung exakt das misst, was auch die offizielle Auswertung
-(`python -m logic.evaluation`) ausweist. `w_comfort` ist in der Oberfläche einstellbar
-(Standard 1.0, siehe `logic/live_control.py::DEFAULT_REWARD`).
+`tdis_tot` ist weiterhin BOPTESTs offizielles Komfort-Defizit-KPI (`GET /kpi/{testid}`,
+integriertes Defizit in Kelvin-Stunden) — die Batterie/PV beeinflussen den thermischen
+Komfort nicht, hier ändert sich nichts. **`eigene_Kosten`** ersetzt dagegen BOPTESTs
+`cost_tot` (das jede Wärmepumpen-Kilowattstunde pauschal zum Netzpreis abrechnet und weder
+Batterie noch PV kennt) durch eine selbst geführte, batterie- und PV-bewusste Kostenrechnung
+— siehe nächster Abschnitt. `w_comfort` ist in der Oberfläche einstellbar (Standard 1.0,
+siehe `logic/live_control.py::DEFAULT_REWARD`).
+
+## Batterie & PV-Anlage — komplett in Python, unabhängig von BOPTEST
+
+`bestest_hydronic_heat_pump` hat im FMU-Modell weder Batterie noch PV-Anlage. Beides kommt
+rein aus zwei gestapelten `gymnasium.Wrapper`n obendrauf, die BOPTEST selbst nicht kennt:
+
+**`logic/battery_env.py::BatteryEnv`** (wickelt `BoptestGymEnv` ein):
+1. **Batterie-Zustand** (`battery_soc`, 0–1): eigener Python-Zustand, Schritt für Schritt
+   fortgeschrieben, physikalisch beschränkt (Lade-/Entladewirkungsgrad, `MIN_SOC`/`MAX_SOC`
+   als Schongrenzen, `MAX_POWER_KW` als Leistungsgrenze — alles Konstanten am Dateianfang).
+2. **Erweiterter Aktionsraum**: `Box([0, -3], [1, 3])` — Dimension 0 ist weiterhin die
+   Wärmepumpen-Modulation (geht an BOPTEST), Dimension 1 ist `battery_power_kw` (positiv =
+   laden, negativ = entladen; geht **nie** an BOPTEST, bleibt rein lokal).
+3. **Erweiterte Beobachtung**: `battery_soc` wird an die BOPTEST-Beobachtung angehängt.
+4. **Kosten**: Netzbezug = `max(0, Wärmepumpenleistung + Batterieladeleistung)` — Laden
+   erhöht den Netzbezug, Entladen senkt ihn (bei ausreichender Entladung bis auf 0, kein
+   Export/keine Einspeisevergütung in diesem einfachen Modell). Die Wärmepumpenleistung kommt
+   aus `reaPHeaPum_y`, das `BoptestGymEnv.step()` jetzt zusätzlich im `info['res']`-Dict
+   durchreicht (kleine, bewusste Erweiterung der vendorten Datei, siehe dort). Der Strompreis
+   wird — wie schon in `logic/watch.py::record()` — einmal pro Episode komplett vorab per
+   `/forecast` geladen (deterministisches Szenario, kein Grund für einen API-Aufruf pro
+   Schritt).
+
+**`logic/solar_env.py::SolarEnv`** (wickelt `BatteryEnv` ein, gleiches Prinzip): keine eigene
+Aktion — Solarerzeugung ist nicht steuerbar —, berechnet stattdessen je Schritt
+
+```
+P_solar = HDirNor * A_panel * eta_panel / 1000        [kW]
+```
+
+aus BOPTESTs *gemessener* (nicht vorhergesagter) direkter Solarstrahlung
+`weaSta_reaWeaHDirNor_y` (aus demselben `info['res']`). `A_panel` (20 m²) und `eta_panel`
+(19 %) sind **eigene Annahmen dieses Projekts**, keine BOPTEST-Vorgabe — als Konstanten am
+Dateianfang klar gekennzeichnet und leicht änderbar. Solarstrom deckt zuerst den Netzbezug,
+den `BatteryEnv` sonst berechnet hätte (kostenlos, wie bereits entladener Batteriestrom);
+überschüssige Erzeugung wird in diesem einfachen Modell verworfen statt eingespeist.
+
+Beide Wrapper hängen ihre jeweilige Zustandsgröße (`battery_soc`, `solar_power_kw`) zusätzlich
+ins `info`-Dict jedes `step()`-Aufrufs (neben `grid_power_kw`, `heat_pump_power_kw`,
+`step_cost`, `price`) — praktisch für Auswertung/Logging, ohne bei jedem Zugriff durch die
+Wrapper-Kette zu müssen. `logic/watch.py::record()` liest das für die "Beobachten"-Ansicht.
+
+**Bekannte Einschränkung:** Die feste Testperiode (`TEST_START`, 1.–3. Februar, siehe unten)
+ist in diesem Wetterjahr komplett bewölkt (`HDirNor` = 0 durchgehend, verifiziert über
+`logic/dataset.py::load_year()`) — die PV-Anlage produziert auf der Testperiode also nichts,
+nur die Batterie ist dort sichtbar wirksam. Für einen Test mit sichtbarer PV-Nutzung eignet
+sich z. B. ein sommerlicher Zeitraum (`TEST_START` entsprechend anpassen).
+
+`logic/baselines.py::RuleBasedController` bleibt unverändert (setzt weiterhin nur
+`env.unwrapped.actions = []`) — beide Wrapper erkennen die dabei leere Aktion und lassen die
+Batterie einfach untätig, statt einen Fehler auszulösen; die RBC-Baseline ist dadurch effektiv
+"Wärmepumpe vom eingebauten Regler, Batterie/PV ungenutzt".
 
 ## Rule-Based-Controller-Vergleich
 
