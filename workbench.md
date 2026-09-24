@@ -52,26 +52,31 @@ Worker mehr frei ist). Reproduziert und behoben, indem `scripts/start_boptest.ps
 standardmäßig mit `--scale worker=6` startet (`-Workers`-Parameter zum Anpassen) — 6, damit
 auch SAC+PPO+TD3 gleichzeitig (je 2 Worker) laufen können, wie es die Oberfläche erlaubt.
 
-## Belohnung: Kosten + Komfort
+## Belohnung: Kosten + Komfort + Batterie
 
 `logic/envs.py::make_env()` baut standardmäßig einen Wrapper-Stapel:
-`SolarEnv(BatteryEnv(BoptestGymEnv(...)))`. Die Belohnung entsteht dabei nicht mehr direkt in
-der BOPTEST-Anbindung (`BoptestGymEnv.get_reward()`/`HVACReward`, die weiterhin existieren und
-für eine reine Wärmepumpen-Umgebung *ohne* Batterie/PV nutzbar bleiben, z. B. mit
-`battery=False, solar=False` in `make_env()`), sondern in `BatteryEnv` — als negierter Anstieg
-von
+`RewardWrapper(SolarEnv(BatteryEnv(BoptestGymEnv(...))))`. `BatteryEnv` und `SolarEnv` rechnen
+nur Physik und Kosten und legen sie ins `info`-Dict; die Belohnung entsteht an genau einer
+Stelle, in `logic/reward.py::RewardWrapper` (auch mit `battery=False, solar=False` — dann
+dient BOPTESTs `cost_tot` als Kostenquelle). Je Schritt, alles in Euro-Äquivalent:
 
 ```
-Zielfunktion = eigene_Kosten + w_comfort * tdis_tot
+r = -scale * ( Kosten + w_comfort * ΔKomfort-Defizit + w_battery * Batterie-Durchsatz )
+    + scale * w_terminal * Δentnehmbare Batterieenergie * mittlerer Preis   (nur letzter Schritt)
 ```
 
-`tdis_tot` ist weiterhin BOPTESTs offizielles Komfort-Defizit-KPI (`GET /kpi/{testid}`,
-integriertes Defizit in Kelvin-Stunden) — die Batterie/PV beeinflussen den thermischen
-Komfort nicht, hier ändert sich nichts. **`eigene_Kosten`** ersetzt dagegen BOPTESTs
-`cost_tot` (das jede Wärmepumpen-Kilowattstunde pauschal zum Netzpreis abrechnet und weder
-Batterie noch PV kennt) durch eine selbst geführte, batterie- und PV-bewusste Kostenrechnung
-— siehe nächster Abschnitt. `w_comfort` ist in der Oberfläche einstellbar (Standard 1.0,
-siehe `logic/live_control.py::DEFAULT_REWARD`).
+| Term | Einheit | Standard | Wozu |
+|---|---|---|---|
+| Kosten | € | — | Netzbezug × Preis, schon abzüglich Batterie-Entladung und PV (siehe nächster Abschnitt) |
+| `w_comfort` | € je K·h | 1.0 | Anstieg von BOPTESTs offiziellem KPI `tdis_tot` (Kelvin-Stunden) |
+| `w_battery` | € je kWh | 0.02 | Verschleiß: ohne ihn ist sinnloses Hin-und-her-Zyklieren gratis |
+| `w_terminal` | Faktor | 1.0 | Restwert: die Batterie startet mit Ladung, Entladen kostet nichts — ohne Ausgleich könnte der Agent die Startladung verbrauchen und bekäme sie geschenkt |
+
+Alle Gewichte sind in der Oberfläche und in `configs/*.yaml` (Schlüssel `reward`)
+einstellbar, Standardwerte in `logic/reward.py`. Die Einzelterme stehen zusätzlich im
+`info`-Dict (`reward_cost`, `reward_comfort`, `reward_battery`, `reward_terminal`) und in
+den Aufzeichnungen von `logic/watch.py::record()`. `BoptestGymEnv.get_reward()`/`HVACReward`
+existieren weiterhin, werden von `make_env()` aber nicht mehr als Belohnung genutzt.
 
 ## Batterie & PV-Anlage — komplett in Python, unabhängig von BOPTEST
 

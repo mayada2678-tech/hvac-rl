@@ -11,6 +11,8 @@ from logic.envs import make_env
 # Messgrößen, die direkt über BOPTESTs /results-Endpunkt abrufbar sind (siehe
 # boptest-gym/examples/test_and_plot.py::plot_results für dasselbe Muster).
 RESULT_POINTS = ['reaTZon_y', 'reaTSetHea_y', 'reaTSetCoo_y', 'oveHeaPumY_u', 'weaSta_reaWeaTDryBul_y']
+# Einzelterme der Belohnung, siehe logic/reward.py::RewardWrapper.
+REWARD_PARTS = ['reward_cost', 'reward_comfort', 'reward_battery', 'reward_terminal']
 
 
 def policy_from(name_or_model, split='test'):
@@ -27,7 +29,8 @@ def policy_from(name_or_model, split='test'):
 def record(name_or_model, split='test') -> tuple[pd.DataFrame, dict]:
     """Eine Testepisode durchspielen. Ergebnis: (DataFrame mit einer Zeile je Stunde —
     Spalten t, hour, indoor, setpoint_heat, setpoint_cool, outdoor, heat_pump_action,
-    battery_power, battery_soc, solar_power, grid_power, price, reward —, BOPTESTs offizielle
+    battery_power, battery_soc, solar_power, grid_power, price, reward, reward_cost,
+    reward_comfort, reward_battery, reward_terminal —, BOPTESTs offizielle
     KPIs für diese Episode)."""
     env, act = policy_from(name_or_model, split)
     base = env.unwrapped
@@ -35,6 +38,7 @@ def record(name_or_model, split='test') -> tuple[pd.DataFrame, dict]:
 
     rewards, battery_power, battery_soc = [], [], []
     solar_power, grid_power, prices = [], [], []
+    parts = {k: [] for k in REWARD_PARTS}
     done, t = False, 0
     while not done:
         action = act(obs)
@@ -46,6 +50,8 @@ def record(name_or_model, split='test') -> tuple[pd.DataFrame, dict]:
         solar_power.append(float(info.get('solar_power_kw', 0.0)))
         grid_power.append(float(info.get('grid_power_kw', np.nan)))
         prices.append(float(info.get('price', np.nan)))
+        for k in REWARD_PARTS:
+            parts[k].append(float(info.get(k, 0.0)))
         t += 1
 
     res = base.get_results(RESULT_POINTS, start_time=base.start_time + 1)
@@ -76,5 +82,6 @@ def record(name_or_model, split='test') -> tuple[pd.DataFrame, dict]:
         'grid_power': grid_power,
         'price': prices,
         'reward': rewards,
+        **parts,
     })
     return df, kpis

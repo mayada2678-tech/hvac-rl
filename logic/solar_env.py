@@ -80,6 +80,7 @@ class SolarEnv(gym.Wrapper):
 
         info = dict(info, solar_power_kw=solar_kw, grid_power_kw=grid_power_kw - offset_kw,
                    step_cost=max(0.0, float(info.get('step_cost', 0.0)) - savings))
+        # Nur Kosten — die vollständige Belohnung setzt logic/reward.py::RewardWrapper.
         return self._extend_obs(obs, solar_kw), reward + savings, terminated, truncated, info
 
     def _extend_obs(self, obs: np.ndarray, solar_kw: float) -> np.ndarray:

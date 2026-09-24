@@ -194,15 +194,17 @@ class AgentView(QWidget):
         seed_row.addWidget(self.seed_spin)
         left_layout.addLayout(seed_row)
 
-        left_layout.addWidget(QLabel('<b>Belohnung</b> (gilt für alle Algorithmen, damit vergleichbar) — '
-                                     'Kosten (dynamischer Strompreis) + Komfortgewicht × Komfort-Defizit, '
-                                     'siehe logic/boptest_gym_env.py::HVACReward'))
-        self.w_comfort_spin = QDoubleSpinBox()
-        self.w_comfort_spin.setRange(0.0, 10.0)
-        self.w_comfort_spin.setSingleStep(0.5)
-        self.w_comfort_spin.setDecimals(2)
-        self.w_comfort_spin.setValue(DEFAULT_REWARD['w_comfort'])
-        left_layout.addWidget(QLabel('Gewicht Komfort ggü. Kosten:')); left_layout.addWidget(self.w_comfort_spin)
+        reward_label = QLabel('<b>Belohnung</b> (gilt für alle Algorithmen, damit vergleichbar) — '
+                              'Stromkosten + Komfort-Defizit + Batterie-Verschleiß, am Ende Restwert '
+                              'der Batterie, siehe logic/reward.py')
+        reward_label.setWordWrap(True)
+        left_layout.addWidget(reward_label)
+        self.w_comfort_spin = self._reward_spin(0.0, 10.0, 0.5, 2, DEFAULT_REWARD['w_comfort'])
+        left_layout.addWidget(QLabel('Komfort (€ je Kelvin-Stunde):')); left_layout.addWidget(self.w_comfort_spin)
+        self.w_battery_spin = self._reward_spin(0.0, 0.5, 0.01, 3, DEFAULT_REWARD['w_battery'])
+        left_layout.addWidget(QLabel('Batterie-Verschleiß (€ je kWh Durchsatz):')); left_layout.addWidget(self.w_battery_spin)
+        self.w_terminal_spin = self._reward_spin(0.0, 1.0, 0.25, 2, DEFAULT_REWARD['w_terminal'])
+        left_layout.addWidget(QLabel('Batterie-Restwert am Ende (0 = aus, 1 = voll):')); left_layout.addWidget(self.w_terminal_spin)
 
         btn_row1 = QHBoxLayout()
         self.start_btn = QPushButton('▶ Start')
@@ -256,6 +258,15 @@ class AgentView(QWidget):
         outer.addWidget(left)
         outer.addWidget(sub_tabs, 1)
 
+    @staticmethod
+    def _reward_spin(lo, hi, step, decimals, value):
+        spin = QDoubleSpinBox()
+        spin.setRange(lo, hi)
+        spin.setSingleStep(step)
+        spin.setDecimals(decimals)
+        spin.setValue(value)
+        return spin
+
     # ---------- Trainingssteuerung ----------
 
     def _running_jobs(self):
@@ -267,7 +278,8 @@ class AgentView(QWidget):
             QMessageBox.warning(self, 'Kein Algorithmus gewählt', 'Bitte mindestens einen Algorithmus auswählen.')
             return
         seed = self.seed_spin.value()
-        reward_kwargs = {'w_comfort': self.w_comfort_spin.value()}
+        reward_kwargs = {'w_comfort': self.w_comfort_spin.value(), 'w_battery': self.w_battery_spin.value(),
+                         'w_terminal': self.w_terminal_spin.value()}
         for algo in selected:
             running = self.jobs.get(algo)
             if running and running['proc'].poll() is None:

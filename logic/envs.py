@@ -14,6 +14,7 @@ import random
 
 from logic.battery_env import BatteryEnv
 from logic.boptest_gym_env import BoptestGymEnv
+from logic.reward import RewardWrapper
 from logic.solar_env import SolarEnv
 
 URL = 'http://127.0.0.1:8000'
@@ -58,11 +59,12 @@ TRAIN_WARMUP = 24 * 3600               # 1 Tag Einschwingzeit pro Trainingsepiso
 def make_env(split='train', seed=0, reward_kwargs=None, battery_kwargs=None, solar_kwargs=None,
             battery=True, solar=True, url=URL, testcase=TESTCASE, scenario=None):
     """BOPTEST-Gymnasium-Umgebung, standardmäßig mit Batterie + PV-Anlage (siehe
-    logic/battery_env.py, logic/solar_env.py).
+    logic/battery_env.py, logic/solar_env.py), außen herum immer die Belohnungsfunktion
+    (logic/reward.py::RewardWrapper).
 
     split='train': zufälliger Startzeitpunkt übers Jahr, Testperiode ausgeschlossen.
     split='test' : feste, nie im Training gesehene Periode (siehe TEST_START/-LENGTH).
-    reward_kwargs: an BatteryEnv weitergereicht, z. B. {'w_comfort': 3.0}.
+    reward_kwargs: an RewardWrapper weitergereicht, z. B. {'w_comfort': 3.0, 'w_battery': 0.05}.
     battery_kwargs: an BatteryEnv weitergereicht, z. B. {'capacity_kwh': 13.5, 'max_power_kw': 5.0}.
     solar_kwargs: an SolarEnv weitergereicht, z. B. {'panel_area_m2': 30.0}.
     battery/solar: False = die jeweilige Schicht weglassen (solar=True ohne battery=True
@@ -87,7 +89,7 @@ def make_env(split='train', seed=0, reward_kwargs=None, battery_kwargs=None, sol
                             max_episode_length=TRAIN_EPISODE_LENGTH, warmup_period=TRAIN_WARMUP, **common)
 
     if battery:
-        env = BatteryEnv(env, **reward_kwargs, **battery_kwargs)
+        env = BatteryEnv(env, **battery_kwargs)
     if solar:
         env = SolarEnv(env, **solar_kwargs)
-    return env
+    return RewardWrapper(env, **reward_kwargs)

@@ -15,8 +15,10 @@ Vier Dinge, die dieser Wrapper zur zugrunde liegenden BOPTEST-Umgebung hinzufüg
    Netz (kostet den aktuellen Preis) oder aus der Batterie (kostet nichts extra — wurde schon
    beim Laden bezahlt). Ersetzt BOPTESTs eigenes `cost_tot` (das jede Wärmepumpen-Kilowattstunde
    pauschal zum Netzpreis abrechnet und die Batterie gar nicht kennt) durch eine eigene,
-   batteriebewusste Kostenrechnung; das Komfort-Defizit (`tdis_tot`) kommt weiterhin von
-   BOPTEST, da die Batterie den thermischen Komfort nicht beeinflusst.
+   batteriebewusste Kostenrechnung (`info['step_cost']`).
+
+Die eigentliche Belohnung (Kosten, Komfort, Verschleiß, Restwert) entsteht nicht hier,
+sondern zentral in logic/reward.py::RewardWrapper — dieser Wrapper liefert nur die Zahlen.
 """
 import gymnasium as gym
 import numpy as np
@@ -47,12 +49,11 @@ class BatteryEnv(gym.Wrapper):
     hinzu und wird nie an BOPTEST geschickt.
     """
 
-    def __init__(self, env, w_comfort: float = 1.0, capacity_kwh: float = CAPACITY_KWH,
+    def __init__(self, env, capacity_kwh: float = CAPACITY_KWH,
                 max_power_kw: float = MAX_POWER_KW, charge_efficiency: float = CHARGE_EFFICIENCY,
                 discharge_efficiency: float = DISCHARGE_EFFICIENCY, min_soc: float = MIN_SOC,
                 max_soc: float = MAX_SOC, initial_soc: float = INITIAL_SOC):
         super().__init__(env)
-        self.w_comfort = w_comfort
         self.capacity_kwh = capacity_kwh
         self.max_power_kw = max_power_kw
         self.charge_efficiency = charge_efficiency
@@ -81,7 +82,6 @@ class BatteryEnv(gym.Wrapper):
         self._prices = np.array([])
         self._step_idx = 0
         self.cum_cost = 0.0
-        self._prev_objective = 0.0
 
     # ---------- Preis-Zeitreihe für die Episode vorab laden ----------
 
@@ -113,9 +113,8 @@ class BatteryEnv(gym.Wrapper):
         self.battery_soc = self.initial_soc
         self._step_idx = 0
         self.cum_cost = 0.0
-        self._prev_objective = 0.0
         self._load_price_series()
-        info = dict(info, battery_soc=self.battery_soc)
+        info = dict(info, battery_soc=self.battery_soc, battery_energy_kwh=self.usable_energy_kwh())
         return self._extend_obs(base_obs), info
 
     def step(self, action):
@@ -144,17 +143,13 @@ class BatteryEnv(gym.Wrapper):
         step_cost = grid_power_kw * self._current_price() * dt_hours
         self.cum_cost += step_cost
 
-        kpis = self.env.unwrapped.get_kpis()
-        discomfort = kpis.get('tdis_tot') or 0.0
-        objective = self.cum_cost + self.w_comfort * discomfort
-        reward = -(objective - self._prev_objective)
-        self._prev_objective = objective
-
+        price = self._current_price()
         self._step_idx += 1
-        info = dict(info, battery_soc=self.battery_soc, battery_power_kw=actual_power_kw,
-                   heat_pump_power_kw=heat_pump_power_kw, grid_power_kw=grid_power_kw,
-                   step_cost=step_cost, price=self._current_price())
-        return self._extend_obs(base_obs), reward, terminated, truncated, info
+        info = dict(info, battery_soc=self.battery_soc, battery_energy_kwh=self.usable_energy_kwh(),
+                   battery_power_kw=actual_power_kw, heat_pump_power_kw=heat_pump_power_kw,
+                   grid_power_kw=grid_power_kw, step_cost=step_cost, price=price)
+        # Nur Kosten — die vollständige Belohnung setzt logic/reward.py::RewardWrapper.
+        return self._extend_obs(base_obs), -step_cost, terminated, truncated, info
 
     # ---------- Batterie-Physik ----------
 
@@ -179,6 +174,11 @@ class BatteryEnv(gym.Wrapper):
 
         self.battery_soc = float(np.clip(self.battery_soc, self.min_soc, self.max_soc))
         return actual_power_kw
+
+    def usable_energy_kwh(self) -> float:
+        """Energie, die sich noch aus der Batterie entnehmen ließe (über MIN_SOC, nach
+        Entladeverlust) — Grundlage für den Restwert in logic/reward.py."""
+        return (self.battery_soc - self.min_soc) * self.capacity_kwh * self.discharge_efficiency
 
     def _extend_obs(self, base_obs: np.ndarray) -> np.ndarray:
         return np.append(np.asarray(base_obs, dtype=np.float32), np.float32(self.battery_soc))

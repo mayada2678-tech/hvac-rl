@@ -1,5 +1,5 @@
 algo: PPO
 total_timesteps: 20000
 eval_freq: 2016
-reward: {w_comfort: 1.0}
+reward: {w_comfort: 1.0, w_battery: 0.02, w_terminal: 1.0}
 params: {learning_rate: 0.0003, n_steps: 504, batch_size: 126, gamma: 0.99}
