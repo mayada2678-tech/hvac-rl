@@ -166,6 +166,24 @@ Statusdatei) — siehe `logic/live_control.py::paths_for()`. Das gilt unverände
 `logic/training.py::train()` kennt CityLearn vs. BOPTEST gar nicht, es ruft nur
 `logic.envs.make_env()` auf.
 
+**Stoppen, Abbrechen, Schließen** — ein Training läuft nie unbemerkt im Hintergrund weiter:
+
+- **⏹ Stopp** (sauber): Steuerdatei `stop=true`; das Training beendet den aktuellen Schritt —
+  bzw. bricht eine laufende Auswertungs-Episode sofort ab (`StopRequested`) —, sichert das
+  Modell und beendet sich. Anzeige währenddessen „🟠 wird gestoppt …“; dauert Sekunden.
+- **⛔ Sofort erzwingen**: nach Rückfrage wird der ganze Prozessbaum beendet (`psutil`; das
+  venv-Python unter Windows ist nur ein Starter mit dem Training als Kindprozess). Die
+  BOPTEST-Tests gibt dann die Oberfläche frei (`PUT /stop/{testid}`), die Test-IDs stehen
+  dafür in der Statusdatei.
+- **Fenster schließen** bei laufendem Training: Nachfrage „Stoppen & sichern“ (wartet bis
+  90 s, dann hart) / „Sofort abbrechen“ / „Fenster offen lassen“.
+- **Absturz der Oberfläche**: die Statusdatei enthält die Prozess-ID; beim nächsten Start
+  findet `AgentView._reattach_running()` noch laufende Trainings wieder (geprüft über die
+  Kommandozeile des Prozesses), Stopp/Pause funktionieren dann wieder.
+- **BOPTEST-Freigabe**: `train()` gibt seine beiden BOPTEST-Tests in einem `finally`-Block
+  immer frei (auch bei Stopp/Fehler). Vorher blieben sie belegt, und spätere Läufe scheiterten
+  bei knappen Workern mit `KeyError: 'payload'`.
+
 ## Seite "Datensatz": jeder BOPTEST-Testfall live erkundbar, nicht nur einer
 
 Bewusst **nicht** fest auf `bestest_hydronic_heat_pump` zugeschnitten: `logic/dataset.py`

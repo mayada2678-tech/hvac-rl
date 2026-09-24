@@ -4,11 +4,13 @@ Standard = beste theoretische/Literatur-Empfehlung, live Lernkurve) — und den 
 der Teststrecke beobachten (Unterreiter, siehe gui/watch_view.py).
 
 Jedes Training läuft als eigener Hintergrundprozess (python -m logic.training), gesteuert
-über kleine Dateien in runs/live/ (Details in workbench.md). Das hält die Sache robust: das
-Training läuft weiter, auch wenn das Fenster neu geladen wird, und Fehler in einem
-Algorithmus reißen die anderen nicht mit.
+über kleine Dateien in runs/live/ (Details in workbench.md). Fehler in einem Algorithmus
+reißen so die anderen nicht mit. Beim Schließen des Fensters wird nachgefragt (stoppen &
+sichern / sofort abbrechen), nie still im Hintergrund weitergelaufen; stürzt die Oberfläche
+doch einmal ab, findet sie laufende Trainings beim nächsten Start über deren Prozess-ID wieder.
 """
 import json
+import re
 import subprocess
 import sys
 import time
@@ -16,15 +18,18 @@ from collections import deque
 from pathlib import Path
 
 import pandas as pd
+import psutil
+import requests
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QDoubleSpinBox, QFormLayout, QGroupBox,
-                               QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QRadioButton,
-                               QScrollArea, QSpinBox, QTabWidget, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QDoubleSpinBox, QFormLayout, QGroupBox,
+                               QHBoxLayout, QLabel, QLineEdit, QMessageBox, QProgressDialog, QPushButton,
+                               QRadioButton, QScrollArea, QSpinBox, QTabWidget, QVBoxLayout, QWidget)
 
+from logic.envs import URL as BOPTEST_URL
 from logic.live_control import (ALGOS, RECOMMENDED, load_yaml_preset, paths_for, read_control,
-                                read_status, write_control)
+                                read_status, write_control, write_json)
 from gui.reward_form import RewardForm
 from gui.watch_view import WatchView
 
@@ -32,8 +37,60 @@ from gui.watch_view import WatchView
 # gemittelt wird — lang genug gegen Ausreißer, kurz genug, um Tempowechsel mitzubekommen.
 RATE_WINDOW_S = 60
 
-PHASE_BADGE = {'startet': '🕐', 'läuft': '🟢', 'pausiert': '🟡', 'gestoppt': '🔴',
-              'fertig': '✅', 'fehler': '⚠️', 'unbekannt': '⚪'}
+PHASE_BADGE = {'startet': '🕐', 'läuft': '🟢', 'pausiert': '🟡', 'stoppt': '🟠', 'gestoppt': '🔴',
+              'abgebrochen': '⛔', 'fertig': '✅', 'fehler': '⚠️', 'unbekannt': '⚪'}
+ACTIVE_PHASES = ('startet', 'läuft', 'pausiert')
+# So lange wartet "Stoppen & sichern" beim Schließen des Fensters auf ein sauberes Ende, bevor
+# hart beendet wird (normal: wenige Sekunden — aktueller Schritt + Modell speichern).
+GRACEFUL_STOP_TIMEOUT_S = 90
+
+
+class TrainingProcess:
+    """Ein Trainingsprozess (python -m logic.training) — frisch gestartet (Popen) oder nach
+    einem Neustart der Oberfläche über seine Prozess-ID wiedergefunden. Beenden immer als
+    ganzer Prozessbaum: das venv-Python unter Windows ist nur ein Starter, das eigentliche
+    Training läuft in einem Kindprozess."""
+
+    def __init__(self, popen=None, pid=None):
+        self.popen = popen
+        self.pid = popen.pid if popen is not None else pid
+
+    def poll(self):
+        """None = läuft noch (wie subprocess.Popen.poll)."""
+        if self.popen is not None:
+            return self.popen.poll()
+        try:
+            proc = psutil.Process(self.pid)
+            if proc.is_running() and proc.status() != psutil.STATUS_ZOMBIE:
+                return None
+        except psutil.Error:
+            pass
+        return 0
+
+    def kill(self):
+        try:
+            root = psutil.Process(self.pid)
+            procs = root.children(recursive=True) + [root]
+        except psutil.NoSuchProcess:
+            procs = []
+        for proc in procs:
+            try:
+                proc.kill()
+            except psutil.NoSuchProcess:
+                pass
+        psutil.wait_procs(procs, timeout=10)
+        if self.popen is not None:
+            self.popen.poll()
+
+
+def release_boptest(testids):
+    """BOPTEST-Tests eines hart beendeten Trainings freigeben — der Prozess selbst kann das
+    nach einem Kill nicht mehr (siehe logic/training.py::train, finally-Block)."""
+    for testid in testids or []:
+        try:
+            requests.put(f'{BOPTEST_URL}/stop/{testid}', timeout=5)
+        except requests.RequestException:
+            pass
 
 
 class HyperparamForm(QGroupBox):
@@ -176,6 +233,7 @@ class AgentView(QWidget):
         self.jobs: dict[str, dict] = {}   # algo -> {'proc', 'seed', 'paths', 'logfile'}
         self._known_models: set[str] = set()
         self._build_ui()
+        self._reattach_running()
         self.timer = QTimer(self)
         self.timer.setInterval(2000)
         self.timer.timeout.connect(self._refresh_panel)
@@ -285,8 +343,8 @@ class AgentView(QWidget):
                   '--csv', str(paths['csv']), '--control', str(paths['control']), '--status', str(paths['status'])]
             logfile = open(paths['log'], 'w')
             proc = subprocess.Popen(cmd, cwd=str(self.root), stdout=logfile, stderr=subprocess.STDOUT)
-            self.jobs[algo] = {'proc': proc, 'seed': seed, 'paths': paths, 'logfile': logfile,
-                               'eval_freq': hp['eval_freq'], 'samples': deque()}
+            self.jobs[algo] = {'proc': TrainingProcess(popen=proc), 'seed': seed, 'paths': paths,
+                               'logfile': logfile, 'eval_freq': hp['eval_freq'], 'samples': deque()}
         self._refresh_panel()
 
     def _set_pause(self, flag: bool):
@@ -295,12 +353,95 @@ class AgentView(QWidget):
             write_control(job['paths']['control'], pause=flag, stop=ctrl.get('stop', False))
 
     def _on_stop(self):
+        """Sauber stoppen: das Training beendet den aktuellen Schritt (bzw. bricht eine
+        laufende Auswertung ab), sichert das Modell, gibt BOPTEST frei und beendet sich."""
         for job in self._running_jobs().values():
             write_control(job['paths']['control'], pause=False, stop=True)
+            job['stopping'] = True
+        self._refresh_panel()
 
     def _on_force(self):
-        for job in self._running_jobs().values():
-            job['proc'].terminate()
+        running = self._running_jobs()
+        if not running:
+            return
+        answer = QMessageBox.question(
+            self, 'Sofort abbrechen?',
+            'Das Training wird sofort beendet, ohne den aktuellen Stand zu sichern. Bereits '
+            'gesicherte Zwischenmodelle (beste Auswertung) bleiben erhalten.\n\nFortfahren?')
+        if answer == QMessageBox.StandardButton.Yes:
+            self._kill_jobs(running)
+
+    def _kill_jobs(self, jobs: dict):
+        for job in jobs.values():
+            job['proc'].kill()
+            status = read_status(job['paths']['status'])
+            release_boptest(status.get('testids'))
+            write_json(job['paths']['status'], phase='abgebrochen', timesteps=status.get('timesteps', 0))
+            job['stopping'] = False
+        self._refresh_panel()
+
+    def confirm_close(self) -> bool:
+        """Vom Hauptfenster beim Schließen aufgerufen. False = Fenster offen lassen. Laufende
+        Trainings werden nie stillschweigend im Hintergrund zurückgelassen."""
+        running = self._running_jobs()
+        if not running:
+            return True
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle('Training läuft noch')
+        box.setText(f'Es läuft noch ein Training ({", ".join(running)}). Was soll damit passieren?')
+        box.setInformativeText('„Stoppen & sichern“ beendet den aktuellen Schritt, speichert das '
+                               'Modell und gibt BOPTEST frei (dauert meist nur Sekunden).')
+        graceful = box.addButton('Stoppen && sichern', QMessageBox.ButtonRole.AcceptRole)
+        force = box.addButton('Sofort abbrechen', QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton('Fenster offen lassen', QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(graceful)
+        box.exec()
+        if box.clickedButton() is force:
+            self._kill_jobs(running)
+            return True
+        if box.clickedButton() is not graceful:
+            return False
+
+        self._on_stop()
+        dialog = QProgressDialog('Training wird gestoppt, Modell wird gesichert …', None, 0, 0, self)
+        dialog.setWindowTitle('Bitte warten')
+        dialog.setMinimumDuration(0)
+        dialog.show()
+        deadline = time.time() + GRACEFUL_STOP_TIMEOUT_S
+        while self._running_jobs() and time.time() < deadline:
+            QApplication.processEvents()
+            time.sleep(0.1)
+        dialog.close()
+        leftover = self._running_jobs()
+        if leftover:   # hängt (z. B. BOPTEST antwortet nicht mehr) -> hart beenden
+            self._kill_jobs(leftover)
+        return True
+
+    def _reattach_running(self):
+        """Trainings wiederfinden, die noch aus einer früheren Sitzung laufen (z. B. nach einem
+        Absturz der Oberfläche) — damit Status, Lernkurve, Pause und Stopp wieder funktionieren."""
+        live_dir = self.root / 'runs' / 'live'
+        for status_path in sorted(live_dir.glob('*.status.json')) if live_dir.exists() else []:
+            status = read_status(status_path)
+            m = re.fullmatch(r'(sac|ppo|td3)_seed(\d+)\.status\.json', status_path.name)
+            pid = status.get('pid')
+            if not m or not pid or status.get('phase') not in ACTIVE_PHASES:
+                continue
+            try:
+                cmdline = ' '.join(psutil.Process(pid).cmdline())
+            except psutil.Error:
+                continue
+            if 'logic.training' not in cmdline or status_path.name not in cmdline:
+                continue   # Prozess-ID inzwischen von einem anderen Programm belegt
+            algo, seed = m.group(1).upper(), int(m.group(2))
+            paths = paths_for(algo, seed, self.root)
+            try:
+                eval_freq = json.loads(paths['run_config'].read_text()).get('eval_freq')
+            except (OSError, ValueError):
+                eval_freq = None
+            self.jobs[algo] = {'proc': TrainingProcess(pid=pid), 'seed': seed, 'paths': paths,
+                               'logfile': None, 'eval_freq': eval_freq, 'samples': deque()}
 
     @staticmethod
     def _next_eval_text(job: dict, phase: str, steps: int) -> str:
@@ -329,6 +470,9 @@ class AgentView(QWidget):
         return f'{target} — noch {eta} ({rate:.1f} Schritte/s)'
 
     def _refresh_panel(self):
+        running = bool(self._running_jobs())
+        for btn in (self.stop_btn, self.pause_btn, self.resume_btn, self.force_btn):
+            btn.setEnabled(running)
         if not self.jobs:
             return
         lines = []
@@ -339,10 +483,24 @@ class AgentView(QWidget):
         for algo, job in self.jobs.items():
             status = read_status(job['paths']['status'])
             phase = status.get('phase', 'unbekannt')
+            alive = job['proc'].poll() is None
+            if not alive and phase in ACTIVE_PHASES:
+                phase = 'abgebrochen'   # Prozess weg, ohne Endstatus zu schreiben
+            elif alive and job.get('stopping'):
+                phase = 'stoppt'
+            if not alive and job.get('logfile'):
+                job['logfile'].close()
+                job['logfile'] = None
             badge = PHASE_BADGE.get(phase, '⚪')
             steps = status.get('timesteps', 0)
             reward_txt = f", Ø Belohnung {status['reward']:.2f}" if 'reward' in status else ''
-            lines.append(f"{badge} {algo} (seed {job['seed']}): {steps:,} Schritte{reward_txt}".replace(',', '.'))
+            phase_txt = {'stoppt': ' — wird gestoppt, Modell wird gesichert …',
+                         'abgebrochen': ' — abgebrochen', 'gestoppt': ' — gestoppt',
+                         'pausiert': ' — pausiert'}.get(phase, '')
+            if phase == 'läuft' and status.get('evaluating'):
+                phase_txt = ' — Auswertung läuft …'
+            lines.append(f"{badge} {algo} (seed {job['seed']}): {steps:,} Schritte{reward_txt}".replace(',', '.')
+                         + phase_txt)
             if phase == 'fehler' and 'message' in status:
                 lines.append(f"    ⚠️ {status['message']}")
             eta = self._next_eval_text(job, phase, steps)

@@ -14,6 +14,14 @@ class MainWindow(QMainWindow):
         self.resize(1400, 900)
 
         tabs = QTabWidget()
-        tabs.addTab(AgentView(root), '🤖 Agent')
+        self.agent_view = AgentView(root)
+        tabs.addTab(self.agent_view, '🤖 Agent')
         tabs.addTab(DatasetView(), '📊 Datensatz')
         self.setCentralWidget(tabs)
+
+    def closeEvent(self, event):
+        # Laufende Trainings nie stillschweigend im Hintergrund zurücklassen — nachfragen.
+        if self.agent_view.confirm_close():
+            event.accept()
+        else:
+            event.ignore()

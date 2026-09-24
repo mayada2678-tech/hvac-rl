@@ -14,6 +14,7 @@ Live-Lernkurve und Fernsteuerung (Pause/Stopp) über drei zusätzliche Dateipfad
 der Oberfläche erzeugte *.run.json (beides gültiges YAML — siehe logic/live_control.py).
 """
 import argparse
+import os
 import time
 from pathlib import Path
 
@@ -30,6 +31,11 @@ from logic.live_control import read_control, write_json
 ALGOS = {'SAC': SAC, 'TD3': TD3, 'PPO': PPO}
 
 
+class StopRequested(Exception):
+    """Stopp kam mitten in einer Auswertungs-Episode — bricht sie sofort ab, statt die
+    ganze Testperiode (72 Schritte, ~30-60 s) noch zu Ende zu rechnen."""
+
+
 class LiveCallback(BaseCallback):
     """Wie EvalCallback (periodische Testepisode, bestes Modell sichern), zusätzlich:
     reagiert auf eine Steuerdatei (Pause/Stopp) und schreibt Lernkurve/Status in Dateien,
@@ -42,8 +48,11 @@ class LiveCallback(BaseCallback):
     """
 
     def __init__(self, eval_env, csv_path=None, control_path=None, status_path=None, eval_freq=5000,
-                 n_eval_episodes=1, best_model_dir=None, verbose=0):
+                 n_eval_episodes=1, best_model_dir=None, status_extra=None, verbose=0):
+        """status_extra: wird in jede Statuszeile mitgeschrieben (Prozess-ID, BOPTEST-Test-IDs),
+        damit die Oberfläche den Prozess nach einem Neustart wiederfindet bzw. aufräumen kann."""
         super().__init__(verbose)
+        self.status_extra = status_extra or {}
         self.eval_env = eval_env
         self.csv_path = Path(csv_path) if csv_path else None
         self.control_path = Path(control_path) if control_path else None
@@ -66,7 +75,11 @@ class LiveCallback(BaseCallback):
 
     def _write_status(self, **kwargs):
         if self.status_path is not None:
-            write_json(self.status_path, **kwargs)
+            write_json(self.status_path, **self.status_extra, **kwargs)
+
+    def _check_stop_during_eval(self, _locals, _globals):
+        if self._poll_control().get('stop'):
+            raise StopRequested
 
     def _on_step(self) -> bool:
         ctrl = self._poll_control()
@@ -83,8 +96,13 @@ class LiveCallback(BaseCallback):
                 return False
 
         if self.num_timesteps % self.eval_freq == 0:
-            mean_r, _ = evaluate_policy(self.model, self.eval_env, n_eval_episodes=self.n_eval_episodes,
-                                        deterministic=True)
+            self._write_status(phase='läuft', timesteps=self.num_timesteps, evaluating=True)
+            try:
+                mean_r, _ = evaluate_policy(self.model, self.eval_env, n_eval_episodes=self.n_eval_episodes,
+                                            deterministic=True, callback=self._check_stop_during_eval)
+            except StopRequested:
+                self._write_status(phase='gestoppt', timesteps=self.num_timesteps)
+                return False
             if self.csv_path is not None:
                 new = not self.csv_path.exists()
                 with open(self.csv_path, 'a') as f:
@@ -135,8 +153,31 @@ def train(algo, config_path, seed=0, total_timesteps_override=None,
     reward = cfg.get('reward', {})
     total_timesteps = total_timesteps_override or cfg['total_timesteps']
 
-    env = Monitor(make_env('train', seed=seed, reward_kwargs=reward))
-    eval_env = Monitor(make_env('test', seed=seed, reward_kwargs=reward))
+    # Prozess-ID sofort melden (noch vor dem langsamen Umgebungsaufbau), damit die Oberfläche
+    # den Lauf von Anfang an zuordnen und notfalls beenden kann.
+    status_extra = {'pid': os.getpid()}
+    if status_path:
+        write_json(status_path, **status_extra, phase='startet', timesteps=0)
+
+    env = eval_env = None
+    try:
+        env = Monitor(make_env('train', seed=seed, reward_kwargs=reward))
+        eval_env = Monitor(make_env('test', seed=seed, reward_kwargs=reward))
+        status_extra['testids'] = [env.unwrapped.testid, eval_env.unwrapped.testid]
+        if status_path:
+            write_json(status_path, **status_extra, phase='startet', timesteps=0)
+        return _train(algo, cfg, seed, total_timesteps, env, eval_env, reward,
+                     csv_path, control_path, status_path, status_extra, verbose)
+    finally:
+        # BOPTEST-Tests immer freigeben — sonst bleiben die Worker belegt, bis BOPTEST sie
+        # irgendwann selbst verwirft, und spätere Läufe scheitern mit KeyError: 'payload'.
+        for e in (env, eval_env):
+            if e is not None:
+                e.close()
+
+
+def _train(algo, cfg, seed, total_timesteps, env, eval_env, reward,
+          csv_path, control_path, status_path, status_extra, verbose):
 
     name = f'{algo.lower()}_seed{seed}'
     ckpt_dir = Path('models') / f'{name}_ckpt'
@@ -158,10 +199,9 @@ def train(algo, config_path, seed=0, total_timesteps_override=None,
         # per Test reproduziert). Die Steuerdatei anzulegen ist Sache der aufrufenden Seite
         # (gui/agent_view.py schreibt sie, bevor dieser Prozess überhaupt gestartet wird);
         # fehlt sie doch einmal, liefert read_control() ohnehin sichere Standardwerte.
-        if status_path:
-            write_json(status_path, phase='startet', timesteps=0)
         callback = LiveCallback(eval_env, csv_path, control_path, status_path,
-                                eval_freq=cfg.get('eval_freq', 5000), best_model_dir=ckpt_dir)
+                                eval_freq=cfg.get('eval_freq', 5000), best_model_dir=ckpt_dir,
+                                status_extra=status_extra)
     else:
         callback = EvalCallback(eval_env, eval_freq=cfg.get('eval_freq', 5000), n_eval_episodes=1,
                                 deterministic=True, verbose=0, best_model_save_path=str(ckpt_dir))
@@ -182,9 +222,14 @@ def train(algo, config_path, seed=0, total_timesteps_override=None,
 
     if status_path:
         stopped = bool(control_path) and read_control(control_path).get('stop', False)
-        write_json(status_path, phase=('gestoppt' if stopped else 'fertig'), timesteps=model.num_timesteps)
+        write_json(status_path, **status_extra, phase=('gestoppt' if stopped else 'fertig'),
+                   timesteps=model.num_timesteps)
     if verbose and not live:
-        action_stats(model, make_env('test', seed=seed, reward_kwargs=reward))
+        stats_env = make_env('test', seed=seed, reward_kwargs=reward)
+        try:
+            action_stats(model, stats_env)
+        finally:
+            stats_env.close()
     return model
 
 

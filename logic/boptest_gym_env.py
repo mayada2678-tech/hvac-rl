@@ -166,7 +166,15 @@ class BoptestGymEnv(gym.Env):
         return self._get_observations(res), {'res': res}
 
     def stop(self):
-        requests.put(f'{self.url}/stop/{self.testid}')
+        """Gibt den BOPTEST-Test (und damit einen Worker) frei. Mehrfach aufrufbar, wirft nie
+        — wird auch beim Aufräumen nach Fehlern/Abbrüchen gerufen."""
+        if self.testid is None:
+            return
+        try:
+            requests.put(f'{self.url}/stop/{self.testid}', timeout=10)
+        except requests.RequestException:
+            pass
+        self.testid = None
 
     def step(self, action):
         u = {}
@@ -185,7 +193,7 @@ class BoptestGymEnv(gym.Env):
         return self._get_observations(res), reward, terminated, truncated, {'res': res}
 
     def close(self):
-        pass
+        self.stop()
 
     def get_reward(self):
         """Standard-Belohnung: negierter Anstieg der Zielfunktion (Betriebskosten +
