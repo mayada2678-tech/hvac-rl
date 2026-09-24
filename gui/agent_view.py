@@ -28,8 +28,10 @@ from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QDoubleSpi
                                QRadioButton, QScrollArea, QSpinBox, QTabWidget, QVBoxLayout, QWidget)
 
 from logic.envs import URL as BOPTEST_URL
-from logic.live_control import (ALGOS, RECOMMENDED, load_yaml_preset, paths_for, read_control,
-                                read_status, write_control, write_json)
+from logic.live_control import (ALGOS, MAX_PARALLEL_TRAININGS, RECOMMENDED, load_yaml_preset, paths_for,
+                                read_control, read_status, run_tag, variant_for_w, write_control,
+                                write_json)
+from gui.compare_view import CompareView
 from gui.reward_form import RewardForm
 from gui.watch_view import WatchView
 
@@ -37,7 +39,7 @@ from gui.watch_view import WatchView
 # gemittelt wird — lang genug gegen Ausreißer, kurz genug, um Tempowechsel mitzubekommen.
 RATE_WINDOW_S = 60
 
-PHASE_BADGE = {'startet': '🕐', 'läuft': '🟢', 'pausiert': '🟡', 'stoppt': '🟠', 'gestoppt': '🔴',
+PHASE_BADGE = {'wartet': '⏳', 'startet': '🕐', 'läuft': '🟢', 'pausiert': '🟡', 'stoppt': '🟠', 'gestoppt': '🔴',
               'abgebrochen': '⛔', 'fertig': '✅', 'fehler': '⚠️', 'unbekannt': '⚪'}
 ACTIVE_PHASES = ('startet', 'läuft', 'pausiert')
 # So lange wartet "Stoppen & sichern" beim Schließen des Fensters auf ein sauberes Ende, bevor
@@ -230,7 +232,9 @@ class AgentView(QWidget):
         super().__init__(parent)
         self.root = root
         self.models_dir = root / 'models'
-        self.jobs: dict[str, dict] = {}   # algo -> {'proc', 'seed', 'paths', 'logfile'}
+        # Lauf-Name (z. B. 'sac_seed0' oder 'sac_seed0_w0_3') -> {'proc' (None = wartet noch),
+        # 'queued', 'cmd', 'algo', 'label', 'seed', 'paths', 'logfile', 'eval_freq', 'samples'}
+        self.jobs: dict[str, dict] = {}
         self._known_models: set[str] = set()
         self._build_ui()
         self._reattach_running()
@@ -308,6 +312,9 @@ class AgentView(QWidget):
 
         self.watch_view = WatchView(self.models_dir)
         sub_tabs.addTab(self.watch_view, 'Beobachten')
+        self.compare_view = CompareView(self.models_dir, self.root / 'results' / 'compare.csv',
+                                        can_run=self._compare_allowed)
+        sub_tabs.addTab(self.compare_view, 'Vergleich')
         sub_tabs.currentChanged.connect(lambda i: i == 1 and self.watch_view.reload_models())
 
         outer.addWidget(left)
@@ -316,36 +323,84 @@ class AgentView(QWidget):
     # ---------- Trainingssteuerung ----------
 
     def _running_jobs(self):
-        return {a: j for a, j in self.jobs.items() if j['proc'].poll() is None}
+        return {t: j for t, j in self.jobs.items() if j['proc'] is not None and j['proc'].poll() is None}
+
+    def _queued_jobs(self):
+        return {t: j for t, j in self.jobs.items() if j.get('queued')}
+
+    @staticmethod
+    def _label(algo: str, variant: str | None) -> str:
+        if not variant:
+            return algo
+        return f'{algo} · ' + (f'w={variant[1:].replace("_", ".")}' if variant.startswith('w') else variant)
+
+    def _compare_allowed(self) -> tuple[bool, str]:
+        """Der Vergleich braucht selbst einen BOPTEST-Worker — nicht starten, wenn alle belegt sind."""
+        if len(self._running_jobs()) >= MAX_PARALLEL_TRAININGS:
+            return False, (f'Alle BOPTEST-Worker sind gerade durch {MAX_PARALLEL_TRAININGS} Trainings belegt. '
+                           'Bitte warten, bis eines fertig ist.')
+        return True, ''
 
     def _on_start(self):
         selected = [a for a, cb in self.algo_checks.items() if cb.isChecked()]
         if not selected:
             QMessageBox.warning(self, 'Kein Algorithmus gewählt', 'Bitte mindestens einen Algorithmus auswählen.')
             return
+        try:
+            weights = self.reward_form.study_weight_list()
+        except ValueError as e:
+            QMessageBox.warning(self, 'w-Werte ungültig', str(e))
+            return
         seed = self.seed_spin.value()
         reward_kwargs = self.reward_form.values()
+        variants = ([(variant_for_w(w), {**reward_kwargs, 'w_comfort': w}) for w in weights]
+                    if weights else [(None, reward_kwargs)])
+
         for algo in selected:
-            running = self.jobs.get(algo)
-            if running and running['proc'].poll() is None:
-                continue  # läuft schon
             hp = self.forms[algo].values()
             if algo == 'PPO' and hp['params']['n_steps'] % hp['params']['batch_size'] != 0:
                 QMessageBox.warning(self, 'PPO nicht gestartet', 'n_steps muss durch batch_size teilbar sein.')
                 continue
-            paths = paths_for(algo, seed, self.root)
-            write_control(paths['control'], pause=False, stop=False)
-            run_cfg = {'algo': algo, 'total_timesteps': hp['total_timesteps'], 'eval_freq': hp['eval_freq'],
-                      'reward': reward_kwargs, 'params': hp['params'], 'net_arch': hp['net_arch']}
-            paths['run_config'].write_text(json.dumps(run_cfg, indent=2))
-            cmd = [sys.executable, '-m', 'logic.training',
-                  '--algo', algo, '--config', str(paths['run_config']), '--seed', str(seed),
-                  '--csv', str(paths['csv']), '--control', str(paths['control']), '--status', str(paths['status'])]
-            logfile = open(paths['log'], 'w')
-            proc = subprocess.Popen(cmd, cwd=str(self.root), stdout=logfile, stderr=subprocess.STDOUT)
-            self.jobs[algo] = {'proc': TrainingProcess(popen=proc), 'seed': seed, 'paths': paths,
-                               'logfile': logfile, 'eval_freq': hp['eval_freq'], 'samples': deque()}
+            for variant, rkw in variants:
+                tag = run_tag(algo, seed, variant)
+                existing = self.jobs.get(tag)
+                if existing and (existing.get('queued') or tag in self._running_jobs()):
+                    continue  # läuft schon / wartet schon
+                paths = paths_for(algo, seed, self.root, variant)
+                write_control(paths['control'], pause=False, stop=False)
+                run_cfg = {'algo': algo, 'name': tag, 'total_timesteps': hp['total_timesteps'],
+                          'eval_freq': hp['eval_freq'], 'reward': rkw, 'params': hp['params'],
+                          'net_arch': hp['net_arch']}
+                paths['run_config'].write_text(json.dumps(run_cfg, indent=2))
+                if paths['csv'].exists():
+                    paths['csv'].unlink()   # alte Lernkurve eines früheren Laufs gleichen Namens
+                write_json(paths['status'], phase='wartet', timesteps=0)
+                cmd = [sys.executable, '-m', 'logic.training',
+                      '--algo', algo, '--config', str(paths['run_config']), '--seed', str(seed),
+                      '--csv', str(paths['csv']), '--control', str(paths['control']),
+                      '--status', str(paths['status'])]
+                self.jobs[tag] = {'proc': None, 'queued': True, 'cmd': cmd, 'algo': algo,
+                                  'label': self._label(algo, variant), 'seed': seed, 'paths': paths,
+                                  'logfile': None, 'eval_freq': hp['eval_freq'], 'samples': deque()}
+        self._start_queued()
         self._refresh_panel()
+
+    def _start_queued(self):
+        """Wartende Läufe starten, solange BOPTEST-Worker frei sind (je Training zwei: Training +
+        Auswertung). Weitere warten und starten automatisch, sobald ein Lauf endet."""
+        for job in self._queued_jobs().values():
+            if len(self._running_jobs()) >= MAX_PARALLEL_TRAININGS:
+                break
+            job['logfile'] = open(job['paths']['log'], 'w')
+            popen = subprocess.Popen(job['cmd'], cwd=str(self.root), stdout=job['logfile'],
+                                     stderr=subprocess.STDOUT)
+            job['proc'] = TrainingProcess(popen=popen)
+            job['queued'] = False
+
+    def _cancel_queued(self):
+        for job in self._queued_jobs().values():
+            job['queued'] = False
+            write_json(job['paths']['status'], phase='gestoppt', timesteps=0)
 
     def _set_pause(self, flag: bool):
         for job in self._running_jobs().values():
@@ -354,7 +409,9 @@ class AgentView(QWidget):
 
     def _on_stop(self):
         """Sauber stoppen: das Training beendet den aktuellen Schritt (bzw. bricht eine
-        laufende Auswertung ab), sichert das Modell, gibt BOPTEST frei und beendet sich."""
+        laufende Auswertung ab), sichert das Modell, gibt BOPTEST frei und beendet sich.
+        Noch wartende Läufe werden gar nicht erst gestartet."""
+        self._cancel_queued()
         for job in self._running_jobs().values():
             write_control(job['paths']['control'], pause=False, stop=True)
             job['stopping'] = True
@@ -362,13 +419,14 @@ class AgentView(QWidget):
 
     def _on_force(self):
         running = self._running_jobs()
-        if not running:
+        if not running and not self._queued_jobs():
             return
         answer = QMessageBox.question(
             self, 'Sofort abbrechen?',
             'Das Training wird sofort beendet, ohne den aktuellen Stand zu sichern. Bereits '
             'gesicherte Zwischenmodelle (beste Auswertung) bleiben erhalten.\n\nFortfahren?')
         if answer == QMessageBox.StandardButton.Yes:
+            self._cancel_queued()
             self._kill_jobs(running)
 
     def _kill_jobs(self, jobs: dict):
@@ -385,19 +443,24 @@ class AgentView(QWidget):
         Trainings werden nie stillschweigend im Hintergrund zurückgelassen."""
         running = self._running_jobs()
         if not running:
+            self._cancel_queued()
             return True
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Question)
         box.setWindowTitle('Training läuft noch')
-        box.setText(f'Es läuft noch ein Training ({", ".join(running)}). Was soll damit passieren?')
+        names = ', '.join(j['label'] for j in running.values())
+        queued = len(self._queued_jobs())
+        box.setText(f'Es läuft noch ein Training ({names}). Was soll damit passieren?')
         box.setInformativeText('„Stoppen & sichern“ beendet den aktuellen Schritt, speichert das '
-                               'Modell und gibt BOPTEST frei (dauert meist nur Sekunden).')
+                               'Modell und gibt BOPTEST frei (dauert meist nur Sekunden).'
+                               + (f' {queued} wartende Läufe werden nicht mehr gestartet.' if queued else ''))
         graceful = box.addButton('Stoppen && sichern', QMessageBox.ButtonRole.AcceptRole)
         force = box.addButton('Sofort abbrechen', QMessageBox.ButtonRole.DestructiveRole)
         box.addButton('Fenster offen lassen', QMessageBox.ButtonRole.RejectRole)
         box.setDefaultButton(graceful)
         box.exec()
         if box.clickedButton() is force:
+            self._cancel_queued()
             self._kill_jobs(running)
             return True
         if box.clickedButton() is not graceful:
@@ -424,7 +487,8 @@ class AgentView(QWidget):
         live_dir = self.root / 'runs' / 'live'
         for status_path in sorted(live_dir.glob('*.status.json')) if live_dir.exists() else []:
             status = read_status(status_path)
-            m = re.fullmatch(r'(sac|ppo|td3)_seed(\d+)\.status\.json', status_path.name)
+            tag = status_path.name[:-len('.status.json')]
+            m = re.fullmatch(r'(sac|ppo|td3)_seed(\d+)(?:_(.+))?', tag)
             pid = status.get('pid')
             if not m or not pid or status.get('phase') not in ACTIVE_PHASES:
                 continue
@@ -434,14 +498,15 @@ class AgentView(QWidget):
                 continue
             if 'logic.training' not in cmdline or status_path.name not in cmdline:
                 continue   # Prozess-ID inzwischen von einem anderen Programm belegt
-            algo, seed = m.group(1).upper(), int(m.group(2))
-            paths = paths_for(algo, seed, self.root)
+            algo, seed, variant = m.group(1).upper(), int(m.group(2)), m.group(3)
+            paths = paths_for(algo, seed, self.root, variant)
             try:
                 eval_freq = json.loads(paths['run_config'].read_text()).get('eval_freq')
             except (OSError, ValueError):
                 eval_freq = None
-            self.jobs[algo] = {'proc': TrainingProcess(pid=pid), 'seed': seed, 'paths': paths,
-                               'logfile': None, 'eval_freq': eval_freq, 'samples': deque()}
+            self.jobs[tag] = {'proc': TrainingProcess(pid=pid), 'queued': False, 'algo': algo,
+                              'label': self._label(algo, variant), 'seed': seed, 'paths': paths,
+                              'logfile': None, 'eval_freq': eval_freq, 'samples': deque()}
 
     @staticmethod
     def _next_eval_text(job: dict, phase: str, steps: int) -> str:
@@ -470,9 +535,13 @@ class AgentView(QWidget):
         return f'{target} — noch {eta} ({rate:.1f} Schritte/s)'
 
     def _refresh_panel(self):
+        self._start_queued()
         running = bool(self._running_jobs())
-        for btn in (self.stop_btn, self.pause_btn, self.resume_btn, self.force_btn):
+        active = running or bool(self._queued_jobs())
+        for btn in (self.pause_btn, self.resume_btn):
             btn.setEnabled(running)
+        for btn in (self.stop_btn, self.force_btn):
+            btn.setEnabled(active)
         if not self.jobs:
             return
         lines = []
@@ -480,11 +549,14 @@ class AgentView(QWidget):
         any_data = False
         self.figure.clear()
         ax = self.figure.add_subplot(111)
-        for algo, job in self.jobs.items():
+        for job in self.jobs.values():
+            label = job['label']
             status = read_status(job['paths']['status'])
             phase = status.get('phase', 'unbekannt')
-            alive = job['proc'].poll() is None
-            if not alive and phase in ACTIVE_PHASES:
+            alive = job['proc'] is not None and job['proc'].poll() is None
+            if job.get('queued'):
+                phase = 'wartet'
+            elif not alive and phase in ACTIVE_PHASES:
                 phase = 'abgebrochen'   # Prozess weg, ohne Endstatus zu schreiben
             elif alive and job.get('stopping'):
                 phase = 'stoppt'
@@ -494,19 +566,20 @@ class AgentView(QWidget):
             badge = PHASE_BADGE.get(phase, '⚪')
             steps = status.get('timesteps', 0)
             reward_txt = f", Ø Belohnung {status['reward']:.2f}" if 'reward' in status else ''
-            phase_txt = {'stoppt': ' — wird gestoppt, Modell wird gesichert …',
+            phase_txt = {'wartet': ' — wartet auf freie BOPTEST-Worker',
+                         'stoppt': ' — wird gestoppt, Modell wird gesichert …',
                          'abgebrochen': ' — abgebrochen', 'gestoppt': ' — gestoppt',
                          'pausiert': ' — pausiert'}.get(phase, '')
             if phase == 'läuft' and status.get('evaluating'):
                 phase_txt = ' — Auswertung läuft …'
-            lines.append(f"{badge} {algo} (seed {job['seed']}): {steps:,} Schritte{reward_txt}".replace(',', '.')
+            lines.append(f"{badge} {label} (seed {job['seed']}): {steps:,} Schritte{reward_txt}".replace(',', '.')
                          + phase_txt)
             if phase == 'fehler' and 'message' in status:
                 lines.append(f"    ⚠️ {status['message']}")
             eta = self._next_eval_text(job, phase, steps)
             if eta:
                 lines.append(f"    ⏱ {eta}")
-                pending.append(f"{algo}: {eta}")
+                pending.append(f"{label}: {eta}")
 
             csv_path = job['paths']['csv']
             if csv_path.exists():
@@ -516,7 +589,7 @@ class AgentView(QWidget):
                     d = pd.DataFrame()
                 if not d.empty:
                     any_data = True
-                    ax.plot(d.timesteps, d.reward, marker='o', label=algo)
+                    ax.plot(d.timesteps, d.reward, marker='o', label=label)
 
         self.status_label.setText('\n'.join(lines))
         if any_data:
@@ -539,3 +612,4 @@ class AgentView(QWidget):
         if current_models != self._known_models:
             self._known_models = current_models
             self.watch_view.reload_models()
+            self.compare_view.mark_outdated()

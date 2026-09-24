@@ -14,6 +14,7 @@ Live-Lernkurve und Fernsteuerung (Pause/Stopp) über drei zusätzliche Dateipfad
 der Oberfläche erzeugte *.run.json (beides gültiges YAML — siehe logic/live_control.py).
 """
 import argparse
+import json
 import os
 import time
 from pathlib import Path
@@ -179,7 +180,8 @@ def train(algo, config_path, seed=0, total_timesteps_override=None,
 def _train(algo, cfg, seed, total_timesteps, env, eval_env, reward,
           csv_path, control_path, status_path, status_extra, verbose):
 
-    name = f'{algo.lower()}_seed{seed}'
+    # 'name' setzt die Oberfläche bei Varianten (z. B. sac_seed0_w0_3), sonst Standardname.
+    name = cfg.get('name') or f'{algo.lower()}_seed{seed}'
     ckpt_dir = Path('models') / f'{name}_ckpt'
     net_arch = cfg.get('net_arch')
     policy_kwargs = dict(net_arch=net_arch) if net_arch else None
@@ -219,6 +221,10 @@ def _train(algo, cfg, seed, total_timesteps, env, eval_env, reward,
         model = best
     else:
         model.save(Path('models') / name)
+    # Belohnungsparameter neben dem Modell ablegen — damit logic/evaluation.py weiß, mit
+    # welchem Komfortgewicht dieses Modell trainiert wurde (Kosten-Komfort-Vergleich).
+    (Path('models') / f'{name}.json').write_text(json.dumps(
+        {'algo': algo, 'seed': seed, 'reward': reward, 'timesteps': int(model.num_timesteps)}, indent=2))
 
     if status_path:
         stopped = bool(control_path) and read_control(control_path).get('stop', False)

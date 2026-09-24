@@ -184,6 +184,34 @@ Statusdatei) — siehe `logic/live_control.py::paths_for()`. Das gilt unverände
   immer frei (auch bei Stopp/Fehler). Vorher blieben sie belegt, und spätere Läufe scheiterten
   bei knappen Workern mit `KeyError: 'payload'`.
 
+## Komfortgewicht-Studie & Reiter "Vergleich": Kosten-Komfort-Kurve statt Einzelergebnis
+
+Ein einzelnes trainiertes Modell zeigt nur einen Punkt der Abwägung Kosten ↔ Komfort. Die
+Studie trainiert mehrere Varianten, die sich **nur im Komfortgewicht w** unterscheiden, und
+stellt sie auf derselben Testperiode dem RBC gegenüber:
+„Bei w=1 kaum Ersparnis, bei w=0.1 sparen wir X %, aber Y K·h Komfortverletzung.“
+
+1. **Belohnungsformular → „Komfortgewicht-Studie“** aktivieren, w-Werte eingeben (Standard
+   `1.0, 0.3, 0.1`; Dezimalkomma geht auch: `1,0; 0,3; 0,1`). „▶ Start“ legt je Algorithmus
+   und w einen Lauf an: `runs/live/sac_seed0_w0_3.*`, Modell `models/sac_seed0_w0_3.zip`
+   (`logic/live_control.py::run_tag()`). Neben jedem Modell legt `logic/training.py` eine
+   `models/<name>.json` mit den Belohnungsparametern ab — daher weiß der Vergleich, mit
+   welchem w ein Modell trainiert wurde.
+2. **Warteschlange:** jedes Training belegt zwei BOPTEST-Worker (Training + Auswertung), bei
+   6 Workern laufen also höchstens 3 gleichzeitig (`MAX_PARALLEL_TRAININGS`). Weitere Läufe
+   stehen auf „⏳ wartet auf freie BOPTEST-Worker“ und starten automatisch; „⏹ Stopp“
+   verwirft wartende Läufe.
+3. **Reiter „Vergleich“** (`gui/compare_view.py`, Logik in `logic/evaluation.py::compare()`):
+   RBC + alle Modelle (ohne `*_final`) je eine Testepisode, im Hintergrund-Thread. Kennzahlen:
+   Stromkosten **inkl. Batterie/PV** (Summe `info['step_cost']` — BOPTESTs `cost_tot` kennt
+   beide nicht), Ersparnis ggü. RBC in %, Komfortverletzung `tdis_tot` (K·h), Netzbezug (kWh).
+   Anzeige als Kosten-über-Komfort-Diagramm (je Algorithmus eine Kurve über w, RBC als Stern
+   mit gestrichelter Kostenlinie, Details beim Überfahren mit der Maus), Tabelle und fertigen
+   Sätzen zum Kopieren (`summary_sentences()`). Ergebnisse werden in `results/compare.csv`
+   zwischengespeichert; nur neue/neu trainierte Modelle (Dateizeit) werden neu simuliert.
+   Der Vergleich braucht selbst einen Worker — sind alle durch Trainings belegt, wird er
+   nicht gestartet.
+
 ## Seite "Datensatz": jeder BOPTEST-Testfall live erkundbar, nicht nur einer
 
 Bewusst **nicht** fest auf `bestest_hydronic_heat_pump` zugeschnitten: `logic/dataset.py`

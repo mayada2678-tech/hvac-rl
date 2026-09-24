@@ -14,6 +14,12 @@ import yaml
 from logic.reward import REWARD_DEFAULTS
 
 ALGOS = ['SAC', 'PPO', 'TD3']
+
+# BOPTEST-Worker (scripts/start_boptest.ps1 -Workers, Standard 6). Jedes Training belegt zwei
+# (Training + Auswertung) -> so viele Trainings laufen gleichzeitig, weitere warten in der
+# Oberfläche, bis eines fertig ist.
+BOPTEST_WORKERS = 6
+MAX_PARALLEL_TRAININGS = BOPTEST_WORKERS // 2
 ALGO_CONFIGS = {'SAC': 'configs/sac.yaml', 'PPO': 'configs/ppo.yaml', 'TD3': 'configs/td3.yaml'}
 
 # "Beste theoretische Empfehlung" je Algorithmus: Netzwerkgröße und Hyperparameter, wie sie
@@ -55,12 +61,25 @@ def load_yaml_preset(algo: str, root: Path) -> dict:
            'params': {**base['params'], **cfg.get('params', {})}}
 
 
-def paths_for(algo: str, seed: int, root: Path) -> dict:
+def run_tag(algo: str, seed: int, variant: str | None = None) -> str:
+    """Name eines Laufs = Name des Modells in models/, z. B. 'sac_seed0' oder mit Variante
+    (Komfortgewicht-Studie) 'sac_seed0_w0_3'."""
+    tag = f'{algo.lower()}_seed{seed}'
+    return f'{tag}_{variant}' if variant else tag
+
+
+def variant_for_w(w: float) -> str:
+    """'w0_3' für w=0.3 — bewusst ohne Punkt: Stable-Baselines3 hält sonst '.3' für die
+    Dateiendung und speichert das Modell ohne '.zip' (dann taucht es nirgends mehr auf)."""
+    return f'w{w:g}'.replace('.', '_')
+
+
+def paths_for(algo: str, seed: int, root: Path, variant: str | None = None) -> dict:
     """Alle Dateien eines Laufs: erzeugte Trainingsconfig, Lernkurve (CSV), Steuerdatei,
     Statusdatei, Konsolen-Log."""
     run_dir = Path(root) / 'runs' / 'live'
     run_dir.mkdir(parents=True, exist_ok=True)
-    tag = f'{algo.lower()}_seed{seed}'
+    tag = run_tag(algo, seed, variant)
     return {
         'run_config': run_dir / f'{tag}.run.json',
         'csv': run_dir / f'{tag}.csv',
