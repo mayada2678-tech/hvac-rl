@@ -1,7 +1,7 @@
 algo: SAC
 total_timesteps: 20000
 eval_freq: 2000
-# Belohnungsgewichte (Kosten + Komfort + Batterie-Verschleiß + Batterie-Restwert), siehe
-# logic/reward.py.
-reward: {w_comfort: 1.0, w_battery: 0.02, w_terminal: 1.0}
+# Belohnungsparameter (Kosten + Komfort + Batterie-Verschleiß + Batterie-Restwert), Bedeutung
+# und Quellen in logic/reward.py.
+reward: {w_comfort: 1.0, floor_area_m2: 192, battery_invest_eur_per_kwh: 500, battery_cycle_life: 6000, w_terminal: 1.0, scale: 1.0}
 params: {learning_rate: 0.0003, batch_size: 256, gamma: 0.99, buffer_size: 20000, train_freq: 4, gradient_steps: 4}

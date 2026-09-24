@@ -114,7 +114,8 @@ class BatteryEnv(gym.Wrapper):
         self._step_idx = 0
         self.cum_cost = 0.0
         self._load_price_series()
-        info = dict(info, battery_soc=self.battery_soc, battery_energy_kwh=self.usable_energy_kwh())
+        info = dict(info, battery_soc=self.battery_soc, battery_energy_kwh=self.usable_energy_kwh(),
+                    battery_dod=self.max_soc - self.min_soc)
         return self._extend_obs(base_obs), info
 
     def step(self, action):

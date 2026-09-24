@@ -1,5 +1,5 @@
 algo: TD3
 total_timesteps: 20000
 eval_freq: 2000
-reward: {w_comfort: 1.0, w_battery: 0.02, w_terminal: 1.0}
+reward: {w_comfort: 1.0, floor_area_m2: 192, battery_invest_eur_per_kwh: 500, battery_cycle_life: 6000, w_terminal: 1.0, scale: 1.0}
 params: {learning_rate: 0.001, batch_size: 256, gamma: 0.99, buffer_size: 20000, train_freq: 4, gradient_steps: 4}

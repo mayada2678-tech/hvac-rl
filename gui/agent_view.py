@@ -21,8 +21,9 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QDoubleSpinBox, QFormLay
                                QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QRadioButton,
                                QScrollArea, QSpinBox, QTabWidget, QVBoxLayout, QWidget)
 
-from logic.live_control import (ALGOS, DEFAULT_REWARD, RECOMMENDED, load_yaml_preset,
-                                paths_for, read_control, read_status, write_control)
+from logic.live_control import (ALGOS, RECOMMENDED, load_yaml_preset, paths_for, read_control,
+                                read_status, write_control)
+from gui.reward_form import RewardForm
 from gui.watch_view import WatchView
 
 PHASE_BADGE = {'startet': '🕐', 'läuft': '🟢', 'pausiert': '🟡', 'gestoppt': '🔴',
@@ -194,18 +195,6 @@ class AgentView(QWidget):
         seed_row.addWidget(self.seed_spin)
         left_layout.addLayout(seed_row)
 
-        reward_label = QLabel('<b>Belohnung</b> (gilt für alle Algorithmen, damit vergleichbar) — '
-                              'Stromkosten + Komfort-Defizit + Batterie-Verschleiß, am Ende Restwert '
-                              'der Batterie, siehe logic/reward.py')
-        reward_label.setWordWrap(True)
-        left_layout.addWidget(reward_label)
-        self.w_comfort_spin = self._reward_spin(0.0, 10.0, 0.5, 2, DEFAULT_REWARD['w_comfort'])
-        left_layout.addWidget(QLabel('Komfort (€ je Kelvin-Stunde):')); left_layout.addWidget(self.w_comfort_spin)
-        self.w_battery_spin = self._reward_spin(0.0, 0.5, 0.01, 3, DEFAULT_REWARD['w_battery'])
-        left_layout.addWidget(QLabel('Batterie-Verschleiß (€ je kWh Durchsatz):')); left_layout.addWidget(self.w_battery_spin)
-        self.w_terminal_spin = self._reward_spin(0.0, 1.0, 0.25, 2, DEFAULT_REWARD['w_terminal'])
-        left_layout.addWidget(QLabel('Batterie-Restwert am Ende (0 = aus, 1 = voll):')); left_layout.addWidget(self.w_terminal_spin)
-
         btn_row1 = QHBoxLayout()
         self.start_btn = QPushButton('▶ Start')
         self.stop_btn = QPushButton('⏹ Stopp')
@@ -228,12 +217,14 @@ class AgentView(QWidget):
         self.resume_btn.clicked.connect(lambda: self._set_pause(False))
         self.force_btn.clicked.connect(self._on_force)
 
-        left_layout.addWidget(QLabel('<b>Hyperparameter</b>'))
+        left_layout.addWidget(QLabel('<b>Belohnung & Hyperparameter</b>'))
+        self.reward_form = RewardForm()
         self.forms = {a: HyperparamForm(a, self.root) for a in ALGOS}
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         forms_widget = QWidget()
         forms_layout = QVBoxLayout(forms_widget)
+        forms_layout.addWidget(self.reward_form)
         for a in ALGOS:
             forms_layout.addWidget(self.forms[a])
         forms_layout.addStretch()
@@ -258,15 +249,6 @@ class AgentView(QWidget):
         outer.addWidget(left)
         outer.addWidget(sub_tabs, 1)
 
-    @staticmethod
-    def _reward_spin(lo, hi, step, decimals, value):
-        spin = QDoubleSpinBox()
-        spin.setRange(lo, hi)
-        spin.setSingleStep(step)
-        spin.setDecimals(decimals)
-        spin.setValue(value)
-        return spin
-
     # ---------- Trainingssteuerung ----------
 
     def _running_jobs(self):
@@ -278,8 +260,7 @@ class AgentView(QWidget):
             QMessageBox.warning(self, 'Kein Algorithmus gewählt', 'Bitte mindestens einen Algorithmus auswählen.')
             return
         seed = self.seed_spin.value()
-        reward_kwargs = {'w_comfort': self.w_comfort_spin.value(), 'w_battery': self.w_battery_spin.value(),
-                         'w_terminal': self.w_terminal_spin.value()}
+        reward_kwargs = self.reward_form.values()
         for algo in selected:
             running = self.jobs.get(algo)
             if running and running['proc'].poll() is None:

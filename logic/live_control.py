@@ -11,7 +11,7 @@ from pathlib import Path
 
 import yaml
 
-from logic.reward import W_BATTERY, W_COMFORT, W_TERMINAL
+from logic.reward import REWARD_DEFAULTS
 
 ALGOS = ['SAC', 'PPO', 'TD3']
 ALGO_CONFIGS = {'SAC': 'configs/sac.yaml', 'PPO': 'configs/ppo.yaml', 'TD3': 'configs/td3.yaml'}
@@ -42,8 +42,8 @@ RECOMMENDED = {
                   'policy_delay': 2, 'target_policy_noise': 0.2, 'target_noise_clip': 0.5},
     },
 }
-# Belohnungsgewichte, siehe logic/reward.py (dort auch die Bedeutung jedes Terms).
-DEFAULT_REWARD = {'w_comfort': W_COMFORT, 'w_battery': W_BATTERY, 'w_terminal': W_TERMINAL}
+# Belohnungsparameter, siehe logic/reward.py (dort Bedeutung und Quelle jedes Werts).
+DEFAULT_REWARD = dict(REWARD_DEFAULTS)
 
 
 def load_yaml_preset(algo: str, root: Path) -> dict:
