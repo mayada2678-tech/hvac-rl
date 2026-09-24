@@ -11,6 +11,8 @@ Algorithmus reißen die anderen nicht mit.
 import json
 import subprocess
 import sys
+import time
+from collections import deque
 from pathlib import Path
 
 import pandas as pd
@@ -25,6 +27,10 @@ from logic.live_control import (ALGOS, RECOMMENDED, load_yaml_preset, paths_for,
                                 read_status, write_control)
 from gui.reward_form import RewardForm
 from gui.watch_view import WatchView
+
+# Zeitfenster (Sekunden), über das die Trainingsgeschwindigkeit für die Restzeit-Schätzung
+# gemittelt wird — lang genug gegen Ausreißer, kurz genug, um Tempowechsel mitzubekommen.
+RATE_WINDOW_S = 60
 
 PHASE_BADGE = {'startet': '🕐', 'läuft': '🟢', 'pausiert': '🟡', 'gestoppt': '🔴',
               'fertig': '✅', 'fehler': '⚠️', 'unbekannt': '⚪'}
@@ -279,7 +285,8 @@ class AgentView(QWidget):
                   '--csv', str(paths['csv']), '--control', str(paths['control']), '--status', str(paths['status'])]
             logfile = open(paths['log'], 'w')
             proc = subprocess.Popen(cmd, cwd=str(self.root), stdout=logfile, stderr=subprocess.STDOUT)
-            self.jobs[algo] = {'proc': proc, 'seed': seed, 'paths': paths, 'logfile': logfile}
+            self.jobs[algo] = {'proc': proc, 'seed': seed, 'paths': paths, 'logfile': logfile,
+                               'eval_freq': hp['eval_freq'], 'samples': deque()}
         self._refresh_panel()
 
     def _set_pause(self, flag: bool):
@@ -295,10 +302,37 @@ class AgentView(QWidget):
         for job in self._running_jobs().values():
             job['proc'].terminate()
 
+    @staticmethod
+    def _next_eval_text(job: dict, phase: str, steps: int) -> str:
+        """'nächste Auswertung bei 2.000 Schritten — noch ca. 12 min' aus der gemessenen
+        Geschwindigkeit (Schritte je Sekunde über die letzten RATE_WINDOW_S Sekunden)."""
+        eval_freq = job.get('eval_freq')
+        if not eval_freq or phase not in ('startet', 'läuft', 'pausiert'):
+            return ''
+        next_eval = (steps // eval_freq + 1) * eval_freq
+        target = f'nächste Auswertung bei {next_eval:,} Schritten'.replace(',', '.')
+        if phase == 'pausiert':
+            return f'{target} (pausiert)'
+
+        now = time.time()
+        samples = job['samples']
+        if not samples or samples[-1][1] != steps:
+            samples.append((now, steps))
+        while len(samples) > 2 and now - samples[0][0] > RATE_WINDOW_S:
+            samples.popleft()
+        (t0, s0), (t1, s1) = samples[0], samples[-1]
+        if s1 <= s0 or t1 - t0 < 5:
+            return f'{target} — Geschwindigkeit wird gemessen …'
+        rate = (s1 - s0) / (t1 - t0)
+        minutes = (next_eval - steps) / rate / 60
+        eta = 'unter 1 min' if minutes < 1 else f'ca. {minutes:.0f} min'
+        return f'{target} — noch {eta} ({rate:.1f} Schritte/s)'
+
     def _refresh_panel(self):
         if not self.jobs:
             return
         lines = []
+        pending = []   # Restzeit-Hinweise für den Platzhalter, solange noch keine Kurve da ist
         any_data = False
         self.figure.clear()
         ax = self.figure.add_subplot(111)
@@ -311,6 +345,10 @@ class AgentView(QWidget):
             lines.append(f"{badge} {algo} (seed {job['seed']}): {steps:,} Schritte{reward_txt}".replace(',', '.'))
             if phase == 'fehler' and 'message' in status:
                 lines.append(f"    ⚠️ {status['message']}")
+            eta = self._next_eval_text(job, phase, steps)
+            if eta:
+                lines.append(f"    ⏱ {eta}")
+                pending.append(f"{algo}: {eta}")
 
             csv_path = job['paths']['csv']
             if csv_path.exists():
@@ -328,8 +366,11 @@ class AgentView(QWidget):
             ax.set_ylabel('Ø Belohnung (Testzeitraum)')
             ax.legend()
         else:
-            ax.text(0.5, 0.5, 'Lernkurve erscheint hier, sobald die erste Auswertung durchgelaufen ist.',
-                   ha='center', va='center', transform=ax.transAxes, fontsize=9, color='#8A98A3')
+            text = 'Lernkurve erscheint hier, sobald die erste Auswertung durchgelaufen ist.'
+            if pending:
+                text += '\n\n' + '\n'.join(pending)
+            ax.text(0.5, 0.5, text, ha='center', va='center', transform=ax.transAxes, fontsize=9,
+                   color='#8A98A3', linespacing=1.6)
             ax.set_xticks([]); ax.set_yticks([])
         self.canvas.draw_idle()
 
