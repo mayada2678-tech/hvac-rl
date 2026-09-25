@@ -32,6 +32,10 @@ Aufzeichnungen von logic/watch.py.
 """
 import gymnasium as gym
 
+# Namen der Einzelanteile im info-Dict (zusammen = r) — auch Spalten in logic/watch.py und in
+# der Lernkurven-CSV von logic/training.py.
+REWARD_PARTS = ['reward_cost', 'reward_comfort', 'reward_battery', 'reward_terminal']
+
 # Standardwerte = beste Schätzung aus Literatur/Datenblättern, Quellen je Parameter in
 # PARAM_INFO unten (dort auch Bereich und Beschriftung für die Oberfläche).
 REWARD_DEFAULTS = {

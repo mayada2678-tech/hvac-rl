@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Agent live</title>
+<!-- Live-Version der Animation "Wie der Agent entscheidet": statt sechs fester Beispielschritte
+     fragt die Seite alle 1,5 s /state.json ab (scripts/serve_animation.py liefert dort
+     runs/live/anim_state.json, geschrieben von logic/watch.py::record()). -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=Public+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  box-sizing:border-box; padding-top:env(safe-area-inset-top,0px); padding-bottom:env(safe-area-inset-bottom,0px);
+  color-scheme:light;
+  --paper:#F1F5F6; --surface:#FFFFFF; --ink:#12212B; --ink-2:#465966; --line:#D3DDE2;
+  --agent:#1F4FD8; --agent-tint:#E1E8FB; --on-agent:#fff;
+  --cheap:#1E9E92; --mid:#E9B72E; --peak:#E4572E;
+  --batt:#2FA88C; --grid:#8A98A3; --warn:#E4572E;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    color-scheme:dark;
+    --paper:#0E1920; --surface:#15252E; --ink:#E7EEF2; --ink-2:#A4B4BF; --line:#293B47;
+    --agent:#7E9CFF; --agent-tint:#1D2B57; --on-agent:#0E1920;
+    --cheap:#3DC2B4; --mid:#F2C14E; --peak:#FF7C55; --batt:#3DC2A0; --grid:#7D8C98; --warn:#FF7C55;
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  --paper:#0E1920; --surface:#15252E; --ink:#E7EEF2; --ink-2:#A4B4BF; --line:#293B47;
+  --agent:#7E9CFF; --agent-tint:#1D2B57; --on-agent:#0E1920;
+  --cheap:#3DC2B4; --mid:#F2C14E; --peak:#FF7C55; --batt:#3DC2A0; --grid:#7D8C98; --warn:#FF7C55;
+}
+*,*::before,*::after{box-sizing:border-box}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 1.0625rem/1.55 'Public Sans',system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+.wrap{max-width:980px;margin:0 auto;padding:clamp(20px,4vw,40px) clamp(16px,5vw,40px) 48px}
+h1{font-family:'Bricolage Grotesque','Public Sans',sans-serif;font-weight:800;font-size:clamp(1.7rem,3.6vw,2.3rem);line-height:1.1;margin:0 0 10px;letter-spacing:-.02em;max-width:20ch}
+p.lead{color:var(--ink-2);max-width:62ch;margin:0 0 28px;font-size:1.02rem}
+.stage{background:var(--surface);border:1px solid var(--line);border-radius:20px;padding:clamp(14px,2.5vw,28px)}
+.status{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;justify-content:space-between;margin-bottom:6px}
+.time{font-family:'Bricolage Grotesque','Public Sans',sans-serif;font-weight:800;font-size:1.5rem}
+.pricepill{display:inline-flex;align-items:center;gap:8px;border-radius:999px;padding:6px 14px;font-weight:600;font-size:.95rem;border:1.5px solid var(--line)}
+.pricepill i{width:9px;height:9px;border-radius:50%}
+svg#scene{width:100%;height:auto;display:block;margin:14px 0 4px;overflow:visible}
+.msgbox{min-height:64px;border-radius:14px;background:var(--agent-tint);border:1px solid var(--line);padding:14px 18px;display:flex;gap:12px;align-items:flex-start;margin-top:6px}
+.msgbox svg{width:20px;height:20px;flex:none;margin-top:2px;color:var(--agent)}
+.msgbox p{margin:0;font-size:.98rem;color:var(--ink)}
+.msgbox .sub{display:block;color:var(--ink-2);font-size:.86rem;margin-top:3px}
+.controls{display:flex;align-items:center;gap:14px;margin-top:20px;flex-wrap:wrap}
+.playbtn{display:inline-flex;align-items:center;gap:8px;background:var(--ink);color:var(--paper);border:0;border-radius:999px;padding:11px 20px;font:600 .97rem 'Public Sans',sans-serif;cursor:pointer;min-height:44px}
+.playbtn svg{width:16px;height:16px}
+.live{display:inline-flex;align-items:center;gap:8px;color:var(--ink-2);font-size:.9rem;flex:1;min-width:200px}
+.live i{width:10px;height:10px;border-radius:50%;background:var(--grid);flex:none}
+.live[data-state="ok"] i{background:var(--cheap)}
+.live[data-state="stale"] i{background:var(--mid)}
+.live[data-state="error"] i{background:var(--warn)}
+@media (prefers-reduced-motion:no-preference){.live[data-state="ok"] i{animation:blink 1.5s ease-in-out infinite}}
+@keyframes blink{50%{opacity:.35}}
+.progress{flex:1;min-width:160px;height:8px;border-radius:999px;background:var(--line);overflow:hidden}
+.progress span{display:block;height:100%;width:0;background:var(--agent);transition:width .6s ease}
+.legend{display:flex;flex-wrap:wrap;gap:10px 20px;margin-top:22px;padding-top:16px;border-top:1px solid var(--line);font-size:.88rem;color:var(--ink-2)}
+.legend span{display:inline-flex;align-items:center;gap:7px}
+.legend i{width:16px;height:0;border-top:3px solid; border-radius:0}
+.note{margin-top:22px;padding:14px 16px;border-radius:12px;background:var(--paper);border:1px dashed var(--line);font-size:.9rem;color:var(--ink-2);line-height:1.5}
+.note code,.tech code{font-family:ui-monospace,'Cascadia Mono','SF Mono',Consolas,monospace;font-size:.85em;background:var(--paper);padding:1px 6px;border-radius:5px}
+.foot{margin-top:20px;color:var(--ink-2);font-size:.85rem}
+.tech{margin-top:24px;background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:clamp(16px,3vw,24px)}
+.tech h3{font-family:'Bricolage Grotesque','Public Sans',sans-serif;font-weight:600;font-size:1.05rem;margin:0 0 14px}
+.tech dl{display:grid;grid-template-columns:auto 1fr;gap:8px 16px;margin:0}
+.tech dt{font-weight:600;font-size:.88rem;color:var(--ink-2);white-space:nowrap;padding-top:2px}
+.tech dd{margin:0;font-size:.92rem;min-width:0;overflow-wrap:anywhere}
+.tech .formula{margin-top:14px;padding-top:14px;border-top:1px solid var(--line);font-family:ui-monospace,'Cascadia Mono','SF Mono',Consolas,monospace;font-size:.86rem;line-height:1.7;overflow-x:auto;white-space:pre;color:var(--ink)}
+.tech .formula .k{color:var(--ink-2)}
+@media (max-width:560px){.tech dl{grid-template-columns:1fr}.tech dt{padding-top:6px}}
+
+/* SVG element styling */
+.node-box{fill:var(--surface);stroke:var(--line);stroke-width:1.5}
+.node-box.active{stroke:var(--agent);stroke-width:2.5}
+.node-label{font:600 13px 'Public Sans',sans-serif;fill:var(--ink)}
+.node-sub{font:400 11.5px 'Public Sans',sans-serif;fill:var(--ink-2)}
+.flow{fill:none;stroke:var(--line);stroke-width:2.5}
+.flow.on{stroke:var(--agent)}
+.flow.warn{stroke:var(--warn)}
+.flowdash{stroke-dasharray:7 7}
+@media (prefers-reduced-motion:no-preference){
+  .flowdash.on{animation:flowmove 0.9s linear infinite}
+}
+@keyframes flowmove{to{stroke-dashoffset:-28}}
+.battfill{transition:height .6s ease, y .6s ease}
+.icon-stroke{fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.ctrl{fill:none;stroke:var(--agent);stroke-width:1.6;stroke-dasharray:3 5;opacity:.9;marker-end:url(#arrow)}
+.obs{fill:none;stroke:var(--ink-2);stroke-width:1.4;stroke-dasharray:2 4;opacity:.7}
+.sky-rect{transition:fill .9s ease, opacity .9s ease}
+.star{fill:#fff;opacity:0;transition:opacity .9s ease}
+.star.on{opacity:.85}
+.sun{transition:opacity .9s ease, transform .9s ease}
+.moon{transition:opacity .9s ease}
+.win{transition:fill .7s ease}
+#scene{border-radius:14px}
+.solar-flow{fill:none;stroke:#E9B72E;stroke-width:2.5;stroke-dasharray:6 6;opacity:0;transition:opacity .6s ease}
+.solar-flow.on{opacity:1}
+@media (prefers-reduced-motion:no-preference){.solar-flow.on{animation:flowmove .8s linear infinite}}
+.pv{transition:opacity .6s ease}
+@media (prefers-reduced-motion:no-preference){
+  .ctrl{animation:ctrlmove 1s linear infinite}
+  #n-agent.pulse circle{animation:pulse .5s ease}
+}
+@keyframes ctrlmove{to{stroke-dashoffset:-16}}
+@keyframes pulse{0%{r:10}50%{r:13}100%{r:10}}
+.legend i.ctrl-sw{border-top-style:dashed}
+
+/* Eingebettet in die Desktop-App (gui/watch_view.py, ?embedded=1): nur Szene + Status,
+   Steuerung übernehmen Schieberegler/Abspielen der App; Hintergrund wie das App-Theme. */
+body.embedded{--paper:#1e1e1e;--surface:#252526;--line:#3c3c3c}
+body.embedded .wrap{max-width:none;padding:10px 12px 12px}
+body.embedded h1, body.embedded .lead, body.embedded .note, body.embedded .tech,
+body.embedded .foot, body.embedded .controls, body.embedded .legend{display:none}
+body.embedded .stage{padding:12px 16px}
+/* Szene auf die Höhe des App-Bereichs begrenzen (Seitenverhältnis bleibt) — kein Scrollen. */
+body.embedded svg#scene{max-height:calc(100vh - 190px);margin:8px 0 4px}
+body.embedded .msgbox{min-height:0;padding:10px 14px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Wie der Agent Preis, Batterie und Netz gegeneinander abwägt — live</h1>
+  <p class="lead">Echte Werte aus der laufenden Testepisode: Strompreis, Ladezustand der Batterie, Solarerzeugung, Zonentemperatur und die Aktion des Agenten, Stunde für Stunde.</p>
+
+  <div class="stage">
+    <div class="status">
+      <div class="time" id="time-label">–</div>
+      <span class="pricepill" id="price-pill"><i id="price-dot"></i><span id="price-text">Strompreis –</span></span>
+    </div>
+
+    <svg id="scene" viewBox="0 0 720 300" role="img" aria-label="Schema: Stromnetz, Agent, Batterie, Wärmepumpe und Haus"></svg>
+
+    <div class="msgbox">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path class="icon-stroke" d="M4 5h16v11H8l-4 4V5Z"/></svg>
+      <p id="msg-main">Warte auf Daten …<span class="sub" id="msg-sub"></span></p>
+    </div>
+
+    <div class="controls">
+      <button class="playbtn" id="playbtn" type="button">
+        <svg id="play-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>
+        <span id="play-label">Pause</span>
+      </button>
+      <span class="live" id="live" data-state="wait" role="status" aria-live="polite"><i></i><span id="live-text">Verbinde …</span></span>
+      <div class="progress" aria-hidden="true"><span id="progress"></span></div>
+    </div>
+
+    <div class="legend">
+      <span><i style="border-color:var(--agent)"></i>Aktiver Stromfluss</span>
+      <span><i style="border-color:var(--warn)"></i>Netzbezug trotz hohem Preis</span>
+      <span><i class="ctrl-sw" style="border-color:var(--agent)"></i>Steuersignal des Agenten</span>
+      <span><i class="ctrl-sw" style="border-color:var(--ink-2)"></i>Innentemperatur, gemessen vom Agenten</span>
+      <span><i style="border-color:#E9B72E;border-top-style:dashed"></i>Solarstrom</span>
+    </div>
+  </div>
+
+  <p class="note">Live-Daten: <code>logic/watch.py::record()</code> schreibt nach jedem Schritt <code>runs/live/anim_state.json</code>, <code>scripts/serve_animation.py</code> liefert die Datei als <code>/state.json</code>, diese Seite fragt sie alle 1,5 s ab. Eine Episode startet z. B. über den Reiter „Beobachten“. „Günstig“/„teuer“ ist relativ zu den bisher gesehenen Preisen dieser Episode (unteres/oberes Drittel).</p>
+  <div class="tech">
+    <h3>Technischer Hintergrund (bestest_hydronic_heat_pump)</h3>
+    <dl>
+      <dt>Beobachtung</dt>
+      <dd><code>reaTZon_y</code> Zonentemperatur, <code>TDryBul</code> Außentemperatur, <code>PriceElectricPowerDynamic</code> Strompreis, <code>LowerSetp[1]</code>/<code>UpperSetp[1]</code> Komfortband, dazu eigene Zustände <code>battery_soc</code> und <code>solar_power_kw</code></dd>
+      <dt>Aktion</dt>
+      <dd><code>oveHeaPumY_u</code> ∈ [0, 1] — Wärmepumpen-Modulation, geht an BOPTEST · <code>battery_power_kw</code> ∈ [−3, 3] — Batterieleistung (positiv = laden), bleibt rein lokal in Python</dd>
+      <dt>Solar</dt>
+      <dd><code>P_solar = HDirNor · A_panel · η_panel / 1000</code>, mit 20 m² Panelfläche und 19 % Wirkungsgrad (eigene Annahme, keine BOPTEST-Vorgabe)</dd>
+      <dt>Baseline</dt>
+      <dd>eingebauter Regler des Testfalls (<code>actions = []</code>), Batterie/PV bleiben dabei ungenutzt</dd>
+    </dl>
+    <div class="formula">r = <span class="k">−scale ·</span> [ (Kosten + Verschleiß − Restwert) / Wohnfläche <span class="k">+</span> w_comfort · ΔKomfort-Defizit ]
+
+<span class="k">Standardwerte:</span> w_comfort = 1,0 €/m² je K·h · Wohnfläche = 192 m²
+<span class="k">Batterie:</span> 500 €/kWh Anschaffung · 6000 Zyklen · Restwert am Ende voll angerechnet</div>
+  </div>
+
+  <p class="foot" id="foot">Noch keine Daten empfangen.</p>
+</div>
+
+<script>
+(function(){
+'use strict';
+const $=s=>document.querySelector(s);
+
+const STATE_URL='state.json';
+const POLL_MS=1500;
+const STALE_S=10;          // so lange ohne neuen Schritt → "keine neuen Daten"
+const FLOW_EPS=0.05;       // kW, darunter gilt ein Fluss als aus
+
+const LEVELCOL={cheap:'var(--cheap)', mid:'var(--mid)', peak:'var(--peak)'};
+const LEVELTXT={cheap:'Strom günstig', mid:'Strom mittel', peak:'Strom teuer'};
+
+let polling=true, timer=null, last=null, seenPrices=[];
+
+const num=(v,d)=>(v==null||!isFinite(v))?'–':v.toFixed(d).replace('.',',');
+
+function buildScene(){
+  const svg=$('#scene');
+  svg.innerHTML = `
+    <defs>
+      <marker id="arrow" viewBox="0 0 8 8" refX="6" refY="4" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--agent)"/>
+      </marker>
+      <marker id="arrow-obs" viewBox="0 0 8 8" refX="6" refY="4" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--ink-2)"/>
+      </marker>
+      <marker id="arrow-solar" viewBox="0 0 8 8" refX="6" refY="4" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <path d="M0,0 L8,4 L0,8 Z" fill="#E9B72E"/>
+      </marker>
+      <filter id="glow" x="-100%" y="-100%" width="300%" height="300%">
+        <feGaussianBlur stdDeviation="3" result="blur"/>
+        <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+      </filter>
+    </defs>
+    <!-- Sky background (day/night) -->
+    <rect id="sky" class="sky-rect" x="0" y="0" width="720" height="300" rx="16" fill="#0B1622" opacity="0"/>
+    <g id="stars">
+      <circle class="star" cx="60" cy="24" r="1.4"/>
+      <circle class="star" cx="180" cy="14" r="1.1"/>
+      <circle class="star" cx="470" cy="20" r="1.3"/>
+      <circle class="star" cx="620" cy="30" r="1.1"/>
+      <circle class="star" cx="270" cy="10" r="1"/>
+      <circle class="star" cx="550" cy="12" r="1.4"/>
+      <circle class="star" cx="90" cy="46" r="1"/>
+      <circle class="star" cx="410" cy="8" r="1"/>
+    </g>
+    <g id="sun-moon" transform="translate(660,32)">
+      <circle id="sun" class="sun" r="12" fill="#F2C14E"/>
+      <g id="moon" class="moon" opacity="0">
+        <circle r="10" fill="#E7EEF2"/>
+        <circle r="10" cx="4" cy="-2" fill="#0B1622"/>
+      </g>
+    </g>
+
+    <!-- Grid -->
+    <g id="n-grid">
+      <rect class="node-box" x="14" y="118" width="118" height="64" rx="12"/>
+      <path class="icon-stroke" stroke="var(--grid)" transform="translate(38,132)" d="M15 0 4 20h10L8 38l19-22H16Z" fill="var(--grid)" stroke="none"/>
+      <text class="node-label" x="100" y="146" text-anchor="middle">Stromnetz</text>
+      <text class="node-sub" x="100" y="165" text-anchor="middle" id="grid-price-lbl">–</text>
+    </g>
+
+    <!-- Battery -->
+    <g id="n-batt">
+      <rect class="node-box" x="14" y="20" width="118" height="70" rx="12"/>
+      <rect x="46" y="36" width="34" height="6" rx="2" fill="var(--ink-2)"/>
+      <rect x="40" y="42" width="46" height="28" rx="4" fill="none" stroke="var(--line)" stroke-width="1.5"/>
+      <rect id="batt-fill" class="battfill" x="42" y="68" width="42" height="0" rx="2" fill="var(--batt)"/>
+      <text class="node-label" x="73" y="92" text-anchor="middle">Batterie</text>
+      <text class="node-sub" x="73" y="80" text-anchor="middle" id="batt-pct" fill="var(--ink)" font-weight="600" style="font:700 13px 'Public Sans',sans-serif">–</text>
+    </g>
+
+    <!-- Agent -->
+    <g id="n-agent">
+      <rect class="node-box active" x="300" y="118" width="120" height="64" rx="16" fill="var(--agent-tint)"/>
+      <circle cx="360" cy="140" r="10" fill="var(--agent)"/>
+      <path d="M354 138a6 6 0 1 1 12 0" stroke="var(--on-agent)" stroke-width="1.6" fill="none"/>
+      <text class="node-label" x="360" y="166" text-anchor="middle">Agent</text>
+      <text class="node-sub" x="360" y="178" text-anchor="middle" id="agent-sub">liest Preis + SOC</text>
+    </g>
+
+    <!-- Heat pump -->
+    <g id="n-hp">
+      <rect class="node-box" x="300" y="20" width="120" height="70" rx="12"/>
+      <circle cx="360" cy="46" r="14" fill="none" stroke="var(--ink-2)" stroke-width="1.8"/>
+      <path class="icon-stroke" stroke="var(--ink-2)" d="M360 34v24M349 46h22M352 38l16 16M368 38l-16 16"/>
+      <text class="node-label" x="360" y="76" text-anchor="middle" id="hp-lbl">Wärmepumpe</text>
+    </g>
+
+    <!-- House -->
+    <g id="n-house">
+      <rect class="node-box" x="560" y="70" width="150" height="130" rx="14"/>
+      <path d="M585 118 L635 84 L685 118" fill="none" stroke="var(--ink-2)" stroke-width="2" stroke-linejoin="round"/>
+      <g id="pv" class="pv">
+        <rect x="592" y="95" width="86" height="16" rx="2" fill="#2A3B4A" stroke="#0B1622" stroke-width="1" transform="skewX(-18) translate(-30,0)"/>
+        <line x1="600" y1="103" x2="670" y2="103" stroke="#4A6070" stroke-width="1" transform="skewX(-18) translate(-30,0)"/>
+        <text id="pv-kw" x="635" y="70" text-anchor="middle" style="font:700 12px 'Public Sans',sans-serif" fill="#C98A1E">–</text>
+      </g>
+      <rect x="600" y="118" width="70" height="56" rx="3" fill="none" stroke="var(--line)" stroke-width="1.5"/>
+      <rect id="win-l" class="win" x="608" y="126" width="16" height="16" rx="2" fill="var(--line)"/>
+      <rect id="win-r" class="win" x="646" y="126" width="16" height="16" rx="2" fill="var(--line)"/>
+      <circle cx="635" cy="146" r="14" fill="none" stroke="var(--ink-2)" stroke-width="1.6"/>
+      <text id="house-temp" x="635" y="151" text-anchor="middle" style="font:700 13px 'Public Sans',sans-serif" fill="var(--ink)">–</text>
+      <text class="node-label" x="635" y="196" text-anchor="middle">Haus</text>
+    </g>
+
+    <!-- Flow paths -->
+    <path id="f-grid-hp" class="flow flowdash" d="M132,150 C210,150 210,55 300,55"/>
+    <path id="f-batt-hp" class="flow flowdash" d="M132,55 C210,55 210,55 300,55"/>
+    <path id="f-grid-batt" class="flow flowdash" d="M73,118 L73,90"/>
+    <path id="f-hp-house" class="flow flowdash" d="M420,55 C500,55 500,135 560,135"/>
+    <path id="f-agent-grid" class="flow" d="M300,150 L132,150" stroke-dasharray="2 5" opacity=".55"/>
+    <path id="f-agent-batt" class="flow" d="M320,118 C260,80 150,70 90,90" stroke-dasharray="2 5" opacity=".55"/>
+
+    <!-- Control signals: Agent commands each component -->
+    <path class="ctrl" d="M300,145 C220,160 170,160 136,153"/>
+    <path class="ctrl" d="M320,118 C300,90 240,55 200,50" marker-end="url(#arrow)"/>
+    <text x="185" y="105" class="node-sub" fill="var(--agent)" text-anchor="middle" style="font-size:10.5px" id="batt-cmd">steuert battery_power_kw</text>
+
+    <!-- Direct control: Agent sets heat pump power, based on indoor temperature -->
+    <path class="ctrl" d="M375,118 C378,105 375,95 372,90" marker-end="url(#arrow)"/>
+    <text x="440" y="107" class="node-sub" fill="var(--agent)" text-anchor="middle" style="font-size:10.5px" id="hp-cmd">steuert oveHeaPumY_u</text>
+
+    <!-- Observation: House reports indoor temperature back to Agent -->
+    <path class="obs" d="M600,165 C520,190 440,180 400,160" marker-end="url(#arrow-obs)"/>
+    <text x="500" y="205" class="node-sub" fill="var(--ink-2)" text-anchor="middle" style="font-size:10.5px" id="obs-lbl">misst reaTZon_y</text>
+
+    <!-- Weather: current outdoor temperature from BOPTEST -->
+    <g id="n-forecast">
+      <rect class="node-box" x="240" y="212" width="260" height="58" rx="12"/>
+      <circle cx="266" cy="234" r="7" fill="none" stroke="#E9B72E" stroke-width="1.6"/>
+      <path class="icon-stroke" stroke="var(--ink-2)" d="M256 246a7 6 0 0 1 1.5-11.9 8.5 8.5 0 0 1 16 1.2 5.5 5.5 0 0 1 -1 10.7h-16.5Z"/>
+      <text class="node-label" x="288" y="232" style="font-size:12px">Wetter (BOPTEST)</text>
+      <text id="forecast-txt" class="node-sub" x="288" y="250" style="font-size:10.5px">–</text>
+    </g>
+    <path class="ctrl" d="M365,212 L365,182" marker-end="url(#arrow)"/>
+
+    <!-- Solar flow: PV on the roof feeds the house circuit (battery / heat pump) when the sun shines -->
+    <path id="f-solar" class="solar-flow" d="M600,95 C440,6 220,6 88,42" marker-end="url(#arrow-solar)"/>
+    <text id="solar-lbl" x="345" y="16" text-anchor="middle" fill="#C98A1E" style="font-size:10.5px;opacity:0" class="pv">Solarstrom</text>
+
+    <!-- Direct control: Agent decides whether solar output charges the battery -->
+    <path id="f-agent-solar" class="ctrl" d="M410,140 C500,150 560,140 605,110" marker-end="url(#arrow)"/>
+    <text id="solar-ctrl-lbl" class="node-sub" x="520" y="168" text-anchor="middle" fill="var(--agent)" style="font-size:10.5px">steuert solar_power_kw → Batterie</text>
+  `;
+}
+
+// Aus den echten Leistungen ableiten, welche Pfade aktiv sind (battery_power_kw: + laden, − entladen).
+function setFlows(s, level){
+  const ids=['f-grid-hp','f-batt-hp','f-grid-batt','f-hp-house'];
+  ids.forEach(id=>document.getElementById(id).classList.remove('on','warn'));
+  const on=(id,...cls)=>document.getElementById(id).classList.add('on',...cls);
+  const grid=s.grid_power_kw||0, batt=s.battery_power_kw||0, hp=s.heat_pump_power_kw||0;
+  if(hp>FLOW_EPS) on('f-hp-house');
+  if(batt<-FLOW_EPS && hp>FLOW_EPS) on('f-batt-hp');
+  if(batt>FLOW_EPS) on('f-grid-batt');
+  // Netzbezug für die Wärmepumpe: bei hohem Preis als Warnung markiert.
+  if(grid>FLOW_EPS && hp>FLOW_EPS) level==='peak' ? on('f-grid-hp','warn') : on('f-grid-hp');
+}
+
+// "Günstig"/"teuer" relativ zu den in dieser Episode bisher gesehenen Preisen (Drittel).
+function priceLevel(p, levels){
+  // Die App kennt die ganze Testperiode und gibt die Drittel-Grenzen direkt mit.
+  if(levels && p!=null) return p<=levels[0] ? 'cheap' : p>=levels[1] ? 'peak' : 'mid';
+  if(seenPrices.length<3 || p==null) return 'mid';
+  const sorted=[...seenPrices].sort((a,b)=>a-b);
+  const q=f=>sorted[Math.floor(f*(sorted.length-1))];
+  return p<=q(1/3) ? 'cheap' : p>=q(2/3) ? 'peak' : 'mid';
+}
+
+function describe(s, level, inside){
+  const parts=[];
+  const hpU=s.action && s.action.length ? s.action[0] : null;
+  parts.push(hpU!=null ? `Wärmepumpe auf ${Math.round(hpU*100)} %` : `Wärmepumpe (eingebauter Regler) ${num(s.heat_pump_power_kw,2)} kW`);
+  const b=s.battery_power_kw||0;
+  parts.push(b>FLOW_EPS ? `Batterie lädt ${num(b,2)} kW` : b<-FLOW_EPS ? `Batterie entlädt ${num(-b,2)} kW` : 'Batterie ruht');
+  parts.push(`Netzbezug ${num(s.grid_power_kw,2)} kW`);
+  if((s.solar_power_kw||0)>0.1) parts.push(`Solar ${num(s.solar_power_kw,2)} kW`);
+  const main=parts.join(' · ')+'.';
+  const band=(s.setpoint_heat_c!=null&&s.setpoint_cool_c!=null) ? ` (Band ${num(s.setpoint_heat_c,1)}–${num(s.setpoint_cool_c,1)} °C)` : '';
+  const sub=`${LEVELTXT[level]} · Innentemperatur ${num(s.indoor_c,1)} °C${band}, ${inside?'im Band':'außerhalb des Bands'} · Belohnung ${s.reward>=0?'+':''}${num(s.reward,4)}`;
+  return [main, sub];
+}
+
+function pulseAgent(){
+  const g=document.getElementById('n-agent');
+  if(!g) return;
+  g.classList.remove('pulse');
+  void g.offsetWidth;
+  g.classList.add('pulse');
+}
+
+function render(s){
+  const newStep = !last || s.step!==last.step || s.strategy!==last.strategy || s.updated!==last.updated;
+  if(!newStep) return;
+  // Neue Episode (Schrittzähler springt zurück oder andere Strategie) → Preisverlauf neu sammeln.
+  if(last && (s.step<last.step || s.strategy!==last.strategy)) seenPrices=[];
+  if(s.price!=null && (!last || s.step!==last.step || s.strategy!==last.strategy)) seenPrices.push(s.price);
+  last=s;
+  pulseAgent();
+
+  const hour=Math.floor((s.time_s/3600)%24), day=Math.floor(s.time_s/86400)%365;
+  const date=new Date(Date.UTC(2023,0,1)+day*86400000);   // Kalenderdatum im Testfalljahr, nur für die Anzeige
+  const night = hour<7 || hour>=19;
+  const level=priceLevel(s.price, s.price_levels);
+  $('#time-label').textContent=`${String(hour).padStart(2,'0')}:00 Uhr · ${date.getUTCDate()}.${date.getUTCMonth()+1}.`;
+  $('#price-dot').style.background=LEVELCOL[level];
+  $('#price-text').textContent=LEVELTXT[level]+' — '+num(s.price,3)+' €/kWh';
+  $('#price-pill').style.borderColor=LEVELCOL[level];
+  $('#grid-price-lbl').textContent=`${num(s.grid_power_kw,2)} kW · ${num(s.price,3)} €`;
+
+  const inside = s.indoor_c!=null && (s.setpoint_heat_c==null || s.indoor_c>=s.setpoint_heat_c) && (s.setpoint_cool_c==null || s.indoor_c<=s.setpoint_cool_c);
+  const [main, sub]=describe(s, level, inside);
+  const msg=$('#msg-main');
+  msg.textContent=main;
+  const subEl=document.createElement('span'); subEl.className='sub'; subEl.id='msg-sub'; subEl.textContent=sub;
+  msg.appendChild(subEl);
+
+  const soc=Math.max(0,Math.min(1,s.battery_soc||0));
+  const battH=Math.round(soc*28);
+  const fill=document.getElementById('batt-fill');
+  fill.setAttribute('height',battH);
+  fill.setAttribute('y',70-battH);
+  fill.setAttribute('fill', soc<0.2?'var(--warn)':'var(--batt)');
+  document.getElementById('batt-pct').textContent=Math.round(soc*100)+'%';
+  const b=s.battery_power_kw||0;
+  document.getElementById('batt-cmd').textContent=`battery_power_kw = ${b>=0?'+':''}${num(b,2)}`;
+  const hpU=s.action && s.action.length ? s.action[0] : null;
+  document.getElementById('hp-cmd').textContent= hpU!=null ? `oveHeaPumY_u = ${num(hpU,2)}` : 'eingebauter Regler';
+  document.getElementById('hp-lbl').textContent=`Wärmepumpe ${num(s.heat_pump_power_kw,1)} kW`;
+  document.getElementById('agent-sub').textContent=s.strategy||'liest Preis + SOC';
+  document.getElementById('obs-lbl').textContent=`reaTZon_y = ${num(s.reaTZon_y,1)} K`;
+
+  const tEl=document.getElementById('house-temp');
+  tEl.textContent=num(s.indoor_c,1)+'°C';
+  tEl.setAttribute('fill', inside ? 'var(--ink)' : 'var(--warn)');
+
+  // Day / night look
+  document.querySelectorAll('.star').forEach(st=>st.classList.toggle('on', night));
+  document.getElementById('sky').setAttribute('opacity', night ? '0.5' : '0');
+  document.getElementById('sun').style.opacity = night ? '0' : '1';
+  document.getElementById('moon').style.opacity = night ? '1' : '0';
+  ['win-l','win-r'].forEach(id=>{
+    const w=document.getElementById(id);
+    w.setAttribute('fill', night ? '#FFD37A' : 'var(--line)');
+    w.setAttribute('filter', night ? 'url(#glow)' : '');
+  });
+  document.getElementById('scene').style.background = night ? '#0B1622' : 'transparent';
+
+  // Solar
+  const solar=s.solar_power_kw||0;
+  document.getElementById('pv-kw').textContent = num(solar,1)+' kW';
+  document.getElementById('f-solar').classList.toggle('on', solar>0.1);
+  document.getElementById('solar-lbl').style.opacity = solar>0.1 ? '1' : '0';
+  document.querySelectorAll('.pv').forEach(el=>{ el.style.opacity = night ? '0.35' : '1'; });
+  document.getElementById('f-agent-solar').style.opacity = solar>0.1 ? '1' : '0.3';
+  document.getElementById('solar-ctrl-lbl').style.opacity = solar>0.1 ? '1' : '0.4';
+  document.getElementById('forecast-txt').textContent = `Außen ${num(s.outdoor_c,1)} °C · Solar ${num(solar,2)} kW`;
+
+  setFlows(s, level);
+  $('#progress').style.width = s.n_steps ? Math.min(100, 100*s.step/s.n_steps)+'%' : '0';
+  $('#foot').textContent=`Schritt ${s.step}${s.n_steps?' von '+s.n_steps:''} — ${s.strategy||''}${s.done?' — Episode beendet':''}`;
+}
+
+function setLive(state, text){
+  $('#live').dataset.state=state;
+  $('#live-text').textContent=text;
+}
+
+async function poll(){
+  try{
+    const r=await fetch(STATE_URL+'?_='+Date.now(), {cache:'no-store'});
+    if(r.status===404){ setLive('wait','Warte auf Daten — noch keine Episode gelaufen'); return; }
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const s=await r.json();
+    render(s);
+    const age=Date.now()/1000-(s.updated||0);
+    if(s.done) setLive('stale','Episode beendet — wartet auf die nächste');
+    else if(age>STALE_S) setLive('stale',`Keine neuen Schritte seit ${Math.round(age)} s`);
+    else setLive('ok','Live — letzter Schritt vor '+Math.max(0,Math.round(age))+' s');
+  }catch(e){
+    setLive('error', location.protocol==='file:' ? 'Über den Server öffnen: python scripts/serve_animation.py' : 'Keine Verbindung zum Server');
+  }
+}
+
+function start(){
+  polling=true;
+  $('#play-icon').innerHTML='<path d="M6 5h4v14H6zM14 5h4v14h-4z"/>';
+  $('#play-label').textContent='Pause';
+  poll();
+  timer=setInterval(poll, POLL_MS);
+}
+function stop(){
+  polling=false;
+  clearInterval(timer);
+  $('#play-icon').innerHTML='<path d="M8 5v14l11-7z"/>';
+  $('#play-label').textContent='Fortsetzen';
+  setLive('wait','Pausiert');
+}
+
+$('#playbtn').addEventListener('click',()=>{ polling? stop() : start(); });
+
+buildScene();
+if(new URLSearchParams(location.search).has('embedded')){
+  // Desktop-App: kein Abfragen — die App ruft applyState() bei jedem Schieberegler-Schritt.
+  document.documentElement.dataset.theme='dark';
+  document.body.classList.add('embedded');
+  window.applyState=s=>render(s);
+}else{
+  start();
+}
+})();
+</script>
+</body>
+</html>

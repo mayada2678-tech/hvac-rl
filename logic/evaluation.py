@@ -26,6 +26,30 @@ ALGOS = {'sac': SAC, 'td3': TD3, 'ppo': PPO}
 RBC = 'Regel (RBC)'
 COMPARE_COLUMNS = ['name', 'algo', 'w', 'cost_eur', 'grid_kwh', 'tdis_kh', 'cost_tot_boptest',
                    'savings_pct', 'mtime', 'error']
+# Zwischenspeicher-Version: Zeilen älterer Versionen (z. B. ohne die vollständigen BOPTEST-KPIs)
+# werden beim nächsten Vergleich neu simuliert statt mit Lücken angezeigt.
+CACHE_VERSION = 2
+
+# Alle Kennzahlen, die im Reiter "Vergleich" frei auf die Achsen gelegt werden können:
+# Schlüssel -> (Beschriftung, besser ist 'low'/'high'/None). BOPTEST-KPIs laut
+# https://ibpsa.github.io/project1-boptest/docs-testcases/ (Werte je m² Wohnfläche bzw. je Zone).
+# Kennzahlen ohne Werte (z. B. Gasverbrauch bei einer Wärmepumpe) blendet die Oberfläche aus.
+METRICS = {
+    'cost_eur':         ('Stromkosten inkl. Batterie/PV (€)', 'low'),
+    'savings_pct':      ('Ersparnis ggü. Referenz (%)', 'high'),
+    'tdis_kh':          ('Komfortverletzung (K·h)', 'low'),
+    'grid_kwh':         ('Netzbezug (kWh)', 'low'),
+    'cost_tot_boptest': ('Kosten lt. BOPTEST, ohne Batterie/PV (€/m²)', 'low'),
+    'ener_tot':         ('Energieverbrauch lt. BOPTEST (kWh/m²)', 'low'),
+    'emis_tot':         ('CO₂-Emissionen lt. BOPTEST (kg/m²)', 'low'),
+    'pele_tot':         ('Elektrische Spitzenlast (kW/m²)', 'low'),
+    'pgas_tot':         ('Gas-Spitzenlast (kW/m²)', 'low'),
+    'pdih_tot':         ('Fernwärme-Spitzenlast (kW/m²)', 'low'),
+    'idis_tot':         ('Luftqualitäts-Defizit (ppm·h)', 'low'),
+    'time_rat':         ('Rechenzeit je Schritt (relativ)', 'low'),
+    'w':                ('Komfortgewicht w', None),
+}
+BOPTEST_KPIS = ['ener_tot', 'emis_tot', 'pele_tot', 'pgas_tot', 'pdih_tot', 'idis_tot', 'time_rat']
 
 
 def run_episode(policy) -> dict:
@@ -92,7 +116,8 @@ def compare(models_dir: Path = Path('models'), cache_path: Path = Path('results/
     if not force and Path(cache_path).exists():
         try:
             old = pd.read_csv(cache_path)
-            cache = {r['name']: r for r in old.to_dict('records') if not isinstance(r.get('error'), str)}
+            cache = {r['name']: r for r in old.to_dict('records')
+                     if not isinstance(r.get('error'), str) and r.get('cache_version') == CACHE_VERSION}
         except (OSError, ValueError, pd.errors.EmptyDataError):
             cache = {}
 
@@ -113,57 +138,80 @@ def compare(models_dir: Path = Path('models'), cache_path: Path = Path('results/
             r = run_episode(policy)
             rows.append({'name': name, 'algo': algo, 'w': w, 'cost_eur': r['cost_eur'],
                          'grid_kwh': r['grid_kwh'], 'tdis_kh': r.get('tdis_tot') or 0.0,
-                         'cost_tot_boptest': r.get('cost_tot'), 'mtime': mtime, 'error': None})
+                         'cost_tot_boptest': r.get('cost_tot'), 'mtime': mtime, 'error': None,
+                         'cache_version': CACHE_VERSION, **{k: r.get(k) for k in BOPTEST_KPIS}})
         except Exception as e:   # z. B. altes Modell mit anderem Beobachtungsraum
             rows.append({'name': name, 'algo': algo, 'w': w, 'mtime': mtime, 'error': str(e)[:200]})
     if progress:
         progress(len(todo), len(todo), '')
 
-    df = pd.DataFrame(rows).reindex(columns=COMPARE_COLUMNS)
-    rbc_cost = df.loc[df.name == RBC, 'cost_eur']
-    if len(rbc_cost) and pd.notna(rbc_cost.iloc[0]) and rbc_cost.iloc[0] > 0:
-        df['savings_pct'] = (1 - df['cost_eur'] / rbc_cost.iloc[0]) * 100
+    df = pd.DataFrame(rows).reindex(columns=COMPARE_COLUMNS + BOPTEST_KPIS + ['cache_version'])
+    df['savings_pct'] = savings_vs(df, RBC)
     Path(cache_path).parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(cache_path, index=False)
     return df
 
 
-def summary_sentences(df: pd.DataFrame) -> list[str]:
-    """Kernaussage des Kosten-Komfort-Vergleichs in Worten, je Modell eine Zeile, sortiert
-    nach Algorithmus und absteigendem w — z. B. 'SAC, w=0.1: 18.3 % günstiger als der RBC,
-    aber 12.4 K·h Komfortverletzung (RBC: 0.9 K·h).'"""
-    ok = df[df['error'].isna() & df['cost_eur'].notna()]
-    rbc = ok[ok.name == RBC]
-    if rbc.empty:
+def savings_vs(df: pd.DataFrame, reference: str = RBC) -> pd.Series:
+    """Ersparnis jeder Zeile gegenüber den Stromkosten der Referenz (RBC oder ein Modell), in %."""
+    ref = df.loc[df.name == reference, 'cost_eur']
+    if not len(ref) or pd.isna(ref.iloc[0]) or ref.iloc[0] <= 0:
+        return pd.Series(np.nan, index=df.index)
+    return (1 - df['cost_eur'] / ref.iloc[0]) * 100
+
+
+def display_name(row) -> str:
+    """'SAC w=0.1' für Studien-Modelle, sonst der Modellname bzw. 'RBC'."""
+    if row['name'] == RBC:
+        return 'RBC'
+    if pd.notna(row.get('w')):
+        return f"{row['algo']} w={row['w']:g}"
+    return row['name']
+
+
+def summary_sentences(df: pd.DataFrame, reference: str = RBC, names=None) -> list[str]:
+    """Kernaussage in Worten gegenüber einer frei wählbaren Referenz (RBC oder ein Modell), je
+    Modell eine Zeile, sortiert nach Algorithmus und absteigendem w — z. B. 'SAC w=0.1: 18.3 %
+    günstiger als der RBC, aber 12.4 K·h Komfortverletzung (+11.5 K·h ggü. RBC).'
+    names: nur diese Zeilen (Modellauswahl der Oberfläche); die Referenz zählt immer mit."""
+    ok = df[df['error'].isna() & df['cost_eur'].notna()].copy()
+    ref = ok[ok.name == reference]
+    if ref.empty:
         return []
-    rbc_tdis = float(rbc.tdis_kh.iloc[0])
-    lines = [f'RBC (Referenz): {rbc.cost_eur.iloc[0]:.2f} € Stromkosten, '
-             f'{rbc_tdis:.1f} K·h Komfortverletzung im Testzeitraum.']
-    models = ok[ok.name != RBC].sort_values(['algo', 'w'], ascending=[True, False], na_position='last')
-    for _, r in models.iterrows():
-        w_txt = f'w={r.w:g}' if pd.notna(r.w) else r['name']
+    ok['savings_pct'] = savings_vs(ok, reference)
+    ref_row = ref.iloc[0]
+    ref_name = display_name(ref_row)
+    ref_article = 'der RBC' if reference == RBC else ref_name
+    ref_tdis = float(ref_row.tdis_kh)
+    lines = [f'Referenz {ref_name}: {ref_row.cost_eur:.2f} € Stromkosten, '
+             f'{ref_tdis:.1f} K·h Komfortverletzung im Testzeitraum.']
+    others = ok[ok.name != reference]
+    if names is not None:
+        others = others[others.name.isin(list(names))]
+    others = others.sort_values(['algo', 'w'], ascending=[True, False], na_position='last')
+    for _, r in others.iterrows():
         pct = r.savings_pct
         if pd.isna(pct):
             cost_txt = f'{r.cost_eur:.2f} €'
         elif abs(pct) < 1:
-            cost_txt = f'kaum Ersparnis ({pct:+.1f} %)'
+            cost_txt = f'kaum Kostenunterschied zu {ref_article} ({pct:+.1f} %)'
         elif pct > 0:
-            cost_txt = f'{pct:.1f} % günstiger als der RBC'
+            cost_txt = f'{pct:.1f} % günstiger als {ref_article}'
         else:
-            cost_txt = f'{-pct:.1f} % teurer als der RBC'
-        comfort = r.tdis_kh - rbc_tdis
-        worse_comfort = comfort > 0.05
+            cost_txt = f'{-pct:.1f} % teurer als {ref_article}'
+        comfort = r.tdis_kh - ref_tdis
         cheaper = pd.notna(pct) and pct >= 1
-        # Bindewort nach Richtung: günstiger/schlechterer Komfort = "aber", teurer/schlechterer
-        # Komfort = "und", teurer/gleich guter Komfort = "dafür", sonst "bei".
-        # Komma nur vor "aber"/"dafür" (Gegensatz), nicht vor "und"/"bei".
-        if worse_comfort:
+        # Bindewort nach Richtung, Komma nur vor Gegensatz ("aber"/"dafür"):
+        # günstiger + schlechterer Komfort = "aber", teurer + schlechterer Komfort = "und",
+        # günstiger + gleich guter Komfort = "bei", teurer + gleich guter Komfort = "dafür".
+        if comfort > 0.05:
             joint = ', aber' if cheaper else ' und'
-            comfort_txt = f'{joint} {r.tdis_kh:.1f} K·h Komfortverletzung ({comfort:+.1f} K·h ggü. RBC)'
+            comfort_txt = (f'{joint} {r.tdis_kh:.1f} K·h Komfortverletzung '
+                           f'({comfort:+.1f} K·h ggü. {"RBC" if reference == RBC else ref_name})')
         else:
             joint = ' bei' if cheaper else ', dafür'
-            comfort_txt = f'{joint} {r.tdis_kh:.1f} K·h Komfortverletzung (nicht mehr als der RBC)'
-        lines.append(f'{r.algo}, {w_txt}: {cost_txt}{comfort_txt}.')
+            comfort_txt = f'{joint} {r.tdis_kh:.1f} K·h Komfortverletzung (nicht mehr als {ref_article})'
+        lines.append(f'{display_name(r)}: {cost_txt}{comfort_txt}.')
     return lines
 
 

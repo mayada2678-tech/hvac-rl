@@ -50,7 +50,8 @@ Oberfläche (PySide6-Fenster, kein Browser) bietet:
 - **🤖 Agent**: SAC, PPO und TD3 einzeln, zu zweit oder alle drei gleichzeitig trainieren
   (Start / Pause / Weiter / Stopp, Netzwerk & Hyperparameter je Algorithmus, live Lernkurve).
   Den Agenten auf der Testperiode beobachten (Stunde für Stunde: Zonentemperatur vs.
-  Komfortband, Wärmepumpen-Modulation, Strompreis) und gegen den RBC vergleichen.
+  Komfortband, Wärmepumpen-Modulation, Strompreis, Belohnung aufgeteilt in ihre vier Anteile)
+  und gegen den RBC vergleichen.
 - **📊 Datensatz**: oben ein Auswahlfeld für **jeden bei BOPTEST bereitgestellten Testfall**
   (`bestest_air`, `bestest_hydronic`, `bestest_hydronic_heat_pump`, mehrere Mehrzonen- und
   Wohn-/Bürogebäude-Varianten, …) — auch ein selbst eintippbarer, eigener Testfall. Die ganze
@@ -82,7 +83,8 @@ tensorboard --logdir runs
 
 ```
 app.py                    Desktop-Einstiegspunkt (PySide6)
-scripts/                   start_boptest.ps1 / stop_boptest.ps1
+scripts/                   start_boptest.ps1 / stop_boptest.ps1, serve_animation.py (Live-Animation, Port 8765)
+web/hvac-agent-animation.html  Live-Animation: liest runs/live/anim_state.json aus logic/watch.py
 logic/
 ├── boptest_gym_env.py         Gymnasium-Umgebung für BOPTEST (REST-Client), Drittanbieter-
 │                              Ursprung siehe THIRD_PARTY_NOTICES.md

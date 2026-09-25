@@ -3,16 +3,10 @@ einzeln einstellbar, vorbelegt mit der besten Schätzung aus Literatur/Datenblä
 (logic/reward.py::REWARD_DEFAULTS, Quelle je Feld im Tooltip). Zeigt die Formel und rechnet
 live aus, was die eingestellten Werte konkret bedeuten (z. B. "1 K·h ≙ 192 €").
 """
-import re
-
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGroupBox, QLabel,
-                               QLineEdit, QPushButton, QVBoxLayout)
+from PySide6.QtWidgets import QComboBox, QDoubleSpinBox, QFormLayout, QGroupBox, QLabel, QPushButton, QVBoxLayout
 
 from logic.battery_env import MAX_SOC, MIN_SOC
 from logic.reward import COMFORT_PRESETS, PARAM_INFO, REWARD_DEFAULTS, wear_cost_per_kwh
-
-# Standard der Komfortgewicht-Studie: BOPTEST-Gym-Standard (1) bis kostenbetont (0.1).
-DEFAULT_STUDY_WEIGHTS = '1.0, 0.3, 0.1'
 
 FORMULA = ('r = −scale · [ (Kosten + Verschleiß − Restwert) / Wohnfläche '
            '+ w · ΔKomfort-Defizit ]')
@@ -60,20 +54,10 @@ class RewardForm(QGroupBox):
         self.summary.setWordWrap(True)
         outer.addWidget(self.summary)
 
-        # Komfortgewicht-Studie: dieselbe Belohnung, nur w variiert -> eine Kosten-Komfort-Kurve
-        # statt eines Einzelergebnisses (Auswertung im Reiter "Vergleich").
-        self.study_check = QCheckBox('Komfortgewicht-Studie: je w eine Variante trainieren')
-        self.study_check.setToolTip('Trainiert je gewähltem Algorithmus eine Variante pro w-Wert '
-                                    '(Modelle z. B. sac_seed0_w0_3). Im Reiter „Vergleich“ entsteht daraus '
-                                    'die Kosten-Komfort-Kurve gegenüber dem RBC.')
-        self.study_weights = QLineEdit(DEFAULT_STUDY_WEIGHTS)
-        self.study_weights.setPlaceholderText('z. B. 1.0, 0.3, 0.1')
-        self.study_weights.setEnabled(False)
-        self.study_check.toggled.connect(self._on_study_toggled)
-        outer.addWidget(self.study_check)
-        form_study = QFormLayout()
-        form_study.addRow('w-Werte:', self.study_weights)
-        outer.addLayout(form_study)
+        hint = QLabel('<small>Mehrere w trainieren und vergleichen: Reiter <b>„Vergleich“</b> '
+                      '(die übrigen Werte hier gelten dort mit).</small>')
+        hint.setWordWrap(True)
+        outer.addWidget(hint)
 
         reset = QPushButton('↺ Beste theoretische Werte')
         reset.setToolTip('Alle Felder auf die Standardwerte aus logic/reward.py zurücksetzen.')
@@ -87,30 +71,6 @@ class RewardForm(QGroupBox):
             self._fields[key].setValue(float(value))
         self._sync_preset()
         self._update_summary()
-
-    def _on_study_toggled(self, on: bool):
-        self.study_weights.setEnabled(on)
-        # In der Studie kommt w aus der Liste, nicht aus dem Einzelfeld.
-        self._fields['w_comfort'].setEnabled(not on)
-        self.preset.setEnabled(not on)
-
-    def study_weight_list(self) -> list[float] | None:
-        """w-Werte der Studie, oder None, wenn keine Studie gewählt ist. ValueError mit
-        verständlicher Meldung bei ungültiger Eingabe."""
-        if not self.study_check.isChecked():
-            return None
-        # Dezimalkomma zulassen ("1,0, 0,3, 0,1"): Komma zwischen zwei Ziffern = Dezimalzeichen,
-        # alle übrigen Kommas/Semikolons/Leerzeichen trennen die Werte.
-        text = re.sub(r'(\d),(\d)', r'\1.\2', self.study_weights.text().strip())
-        try:
-            weights = [float(p) for p in re.split(r'[\s,;]+', text) if p]
-        except ValueError:
-            raise ValueError('Die w-Werte bitte als Zahlen eingeben, getrennt durch Komma oder '
-                             'Semikolon, z. B. 1.0, 0.3, 0.1 oder 1,0; 0,3; 0,1')
-        weights = list(dict.fromkeys(weights))   # Doppelte entfernen, Reihenfolge behalten
-        if not weights or any(w < 0 for w in weights):
-            raise ValueError('Mindestens ein w-Wert, keiner negativ.')
-        return weights
 
     def _on_preset(self, text: str):
         if text in COMFORT_PRESETS:

@@ -1,21 +1,32 @@
 """Qt-Baustein "Beobachten": Stunde-für-Stunde-Animation der Testperiode (3 Tage im Februar,
 siehe logic/envs.py) — Zonentemperatur vs. Komfortband, Wärmepumpen-Modulation, dynamischer
-Strompreis. Strategien: BOPTESTs eingebauter Regler (RBC) und beliebig viele trainierte
-Modelle, zum direkten Vergleich.
+Strompreis, Belohnung je Schritt aufgeteilt in ihre vier Anteile. Strategien: BOPTESTs
+eingebauter Regler (RBC) und beliebig viele trainierte Modelle, zum direkten Vergleich.
+
+Zwei Unterreiter, beide vom selben Schieberegler/Abspielen gesteuert: "Diagramme"
+(matplotlib) und "Animation" (web/hvac-agent-animation.html in einer eingebetteten
+Webansicht, bekommt je Stunde den Zustand der zuletzt gewählten Strategie).
 """
+import json
+import math
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import requests
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QHBoxLayout, QLabel, QListWidget,
                                QListWidgetItem, QPushButton, QSlider, QTableWidget,
-                               QTableWidgetItem, QVBoxLayout, QWidget)
+                               QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
 from stable_baselines3 import PPO, SAC, TD3
 
+from logic.envs import STEP_PERIOD, TEST_START
 from logic.watch import record
+
+ANIM_PAGE = Path(__file__).resolve().parent.parent / 'web' / 'hvac-agent-animation.html'
 
 ALGOS = {'sac': SAC, 'td3': TD3, 'ppo': PPO}
 # Feste Farbzuordnung je Strategie (kategorial, nach Auswahlreihenfolge vergeben, nie nach
@@ -27,12 +38,60 @@ AGENT_COLOR = '#4FC1FF'
 AGENT_PALETTE = ['#4FC1FF', '#4EC9B0', '#F48771', '#C586C0', '#B5CEA8']
 SOLAR_COLOR = '#D7BA7D'
 PRICE_COLOR = '#9d9d9d'
+# Anteile der Belohnung (logic/reward.py::REWARD_PARTS) — eigene, feste Farben,
+# getrennt von den Strategiefarben, weil das Diagramm nur eine Strategie zeigt.
+REWARD_PART_STYLE = [
+    ('reward_cost', 'Stromkosten', '#569CD6'),
+    ('reward_comfort', 'Komfort', '#D16969'),
+    ('reward_battery', 'Verschleiß', '#6A9955'),
+    ('reward_terminal', 'Restwert', '#E2C08D'),
+]
 
 KPI_LABELS = {
     'cost_tot': 'Kosten (€ bzw. $/m²)', 'tdis_tot': 'Komfort-Defizit (Kh/m²)',
     'idis_tot': 'Unbehaglichkeits-Index', 'ener_tot': 'Energie (kWh/m²)',
     'emis_tot': 'CO2-Emissionen (kg/m²)', 'time_rat': 'Rechenzeit-Verhältnis',
 }
+
+
+def plot_reward_parts(ax, x, d: pd.DataFrame, width: float, title: str | None = None,
+                      clip_terminal: bool = True, legend: bool = True):
+    """Belohnung als gestapelte Balken aus ihren Anteilen (logic/reward.py): negative Anteile
+    nach unten, positive nach oben gestapelt, Summe = r. Auch vom Training-Reiter genutzt
+    (gui/agent_view.py, dort ein Balken je Auswertung)."""
+    parts = [(k, label, c) for k, label, c in REWARD_PART_STYLE if k in d]
+    if not parts:
+        return
+    pos = np.zeros(len(d))
+    neg = np.zeros(len(d))
+    for key, label, color in parts:
+        v = d[key].fillna(0.0).to_numpy(dtype=float)
+        ax.bar(x, v, bottom=np.where(v >= 0, pos, neg), width=width, color=color,
+               edgecolor=ax.get_facecolor(), linewidth=0.4, label=label)
+        pos += np.clip(v, 0, None)
+        neg += np.clip(v, None, 0)
+    ax.axhline(0, color='#8a98a3', lw=0.6)
+
+    # Je Stunde: der Restwert fällt nur im letzten Schritt an und ist meist viel größer als ein
+    # einzelner Stundenanteil — die Skala nach den laufenden Anteilen richten, damit die
+    # stündlichen Balken lesbar bleiben, und einen abgeschnittenen Restwert beschriften.
+    running = d[[k for k, *_ in parts if k != 'reward_terminal']].fillna(0.0).to_numpy(dtype=float)
+    if clip_terminal and running.size:
+        lo = min(np.clip(running, None, 0).sum(axis=1).min(), 0.0)
+        hi = max(np.clip(running, 0, None).sum(axis=1).max(), 0.0)
+        pad = 0.15 * (hi - lo) or 1e-6
+        ax.set_ylim(lo - pad, hi + pad)
+        if 'reward_terminal' in d:
+            term = d['reward_terminal'].fillna(0.0).to_numpy(dtype=float)
+            i = int(np.flatnonzero(term)[-1]) if term.any() else None
+            if i is not None and not (lo - pad <= neg[i] and pos[i] <= hi + pad):
+                ax.annotate(f'Restwert {term[i]:+.4f}', xy=(x[i], hi if term[i] > 0 else lo),
+                            xytext=(-4, 0), textcoords='offset points', ha='right', va='center',
+                            fontsize=7, color='#cccccc')
+    if legend:
+        # Neben statt im Diagramm: die Balken füllen die ganze Höhe, eine Legende darin verdeckt sie.
+        ax.legend(loc='upper left', bbox_to_anchor=(1.005, 1.0), fontsize=6.5, frameon=True,
+                  title=title, title_fontsize=6.5)
 
 
 class WatchView(QWidget):
@@ -89,8 +148,16 @@ class WatchView(QWidget):
         # Mindesthöhe erzwingen: bei zu wenig Platz (kleines Fenster) würde Qt die Zeichenfläche
         # sonst über die Lesbarkeit hinaus stauchen und Achsenbeschriftungen/Legende würden
         # sich wieder überlappen — lieber im Zweifel scrollen als unleserlich werden.
-        self.canvas.setMinimumHeight(480)
-        layout.addWidget(self.canvas, 1)
+        self.canvas.setMinimumHeight(580)
+        self.view_tabs = QTabWidget()
+        self.view_tabs.addTab(self.canvas, 'Diagramme')
+        self.anim_view = QWebEngineView()
+        url = QUrl.fromLocalFile(str(ANIM_PAGE))
+        url.setQuery('embedded=1')
+        self.anim_view.loadFinished.connect(lambda _ok: self._push_anim_state())
+        self.anim_view.setUrl(url)
+        self.view_tabs.addTab(self.anim_view, 'Animation')
+        layout.addWidget(self.view_tabs, 1)
 
         layout.addWidget(QLabel('Kennzahlen (BOPTEST-KPIs auf der Testperiode):'))
         self.kpi_table = QTableWidget()
@@ -216,8 +283,10 @@ class WatchView(QWidget):
         # deshalb legitim eine Achse, unterschieden per Linienstil statt Farbe (Farbe bleibt
         # für die Strategie reserviert). Solar (kW) und Preis ($/kWh) bekommen je eine eigene
         # Achse — sie zusammen auf eine Achse zu zwingen (Zwei-Skalen-Diagramm) wäre irreführend.
-        axes = self.figure.subplots(4, 1, sharex=True, height_ratios=[2.2, 1, 1, 1])
-        ax_temp, ax_hp, ax_solar, ax_price = axes
+        # Fünfte Reihe: Belohnungsanteile als gestapelte Balken, nur für die hervorgehobene
+        # (zuletzt gewählte) Strategie — Stapel mehrerer Strategien übereinander wären unlesbar.
+        axes = self.figure.subplots(5, 1, sharex=True, height_ratios=[2.2, 1, 1, 1, 1.2])
+        ax_temp, ax_hp, ax_solar, ax_price, ax_rew = axes
         first = next(iter(self._runs.values())).iloc[:upto]
 
         ax_temp.plot(first.t, first.setpoint_heat, color='#8a98a3', linestyle='--', lw=1, label='Sollwert Heizen')
@@ -242,12 +311,14 @@ class WatchView(QWidget):
         # Datenreihe braucht laut Diagramm-Richtlinie keine eigene Legende, der Achsentitel reicht).
         ax_solar.plot(first.t, first.solar_power, color=SOLAR_COLOR, lw=1.6)
         ax_price.plot(first.t, first.price, color=PRICE_COLOR, lw=1.6)
+        self._draw_reward_parts(ax_rew, chosen[-1], upto)
 
         ax_temp.set_ylabel('Zone (°C)', fontsize=8)
         ax_hp.set_ylabel('Wärmepumpe / SOC (0–1)', fontsize=8)
         ax_solar.set_ylabel('Solar (kW)', fontsize=8)
         ax_price.set_ylabel('Preis ($/kWh)', fontsize=8)
-        ax_price.set_xlabel('Stunde der Testperiode')
+        ax_rew.set_ylabel('Belohnung', fontsize=8)
+        ax_rew.set_xlabel('Stunde der Testperiode')
         for ax in axes:
             ax.tick_params(labelsize=7)
 
@@ -267,10 +338,45 @@ class WatchView(QWidget):
             inside = r.setpoint_heat <= r.indoor <= r.setpoint_cool
             lines.append(f"{n}: {r.indoor:.1f}°C · Wärmepumpe {r.heat_pump_action:.2f} · "
                         f"Batterie {r.battery_power:+.1f} kW (SOC {r.battery_soc:.2f}) · "
-                        + ('im Band' if inside else 'außerhalb Band'))
+                        + ('im Band' if inside else 'außerhalb Band') + f" · r {r.reward:+.4f}")
         r0 = first.iloc[-1]
         self.status_label.setText(f"Stunde {int(r0.hour):02d}:00 — Solar {r0.solar_power:.2f} kW — "
                                   + '   |   '.join(lines))
+        self._push_anim_state()
+
+    def _push_anim_state(self):
+        """Zustand der aktuellen Stunde an die eingebettete Animation geben — für die zuletzt
+        gewählte Strategie, wie die Belohnungsbalken. Feldnamen wie in
+        logic/watch.py::record()s anim_state.json, damit dieselbe Seite beides kann."""
+        if not self._runs:
+            return
+        name = list(self._runs)[-1]
+        d = self._runs[name]
+        i = min(max(self.hour_slider.value(), 1), len(d)) - 1
+        r = d.iloc[i]
+        g = lambda key: r[key] if key in r else None
+        rbc = name == 'Regel (RBC)'
+        state = {
+            'strategy': name, 'step': i + 1, 'n_steps': len(d), 'done': i + 1 == len(d),
+            'time_s': TEST_START + (int(r.t) + 1) * STEP_PERIOD,
+            'price': g('price'), 'price_levels': [d.price.quantile(1 / 3), d.price.quantile(2 / 3)],
+            'battery_soc': g('battery_soc'), 'battery_power_kw': g('battery_power'),
+            'solar_power_kw': g('solar_power'), 'grid_power_kw': g('grid_power'),
+            'heat_pump_power_kw': g('heat_pump_power'),
+            'reaTZon_y': r.indoor + 273.15, 'indoor_c': r.indoor,
+            'setpoint_heat_c': r.setpoint_heat, 'setpoint_cool_c': r.setpoint_cool, 'outdoor_c': r.outdoor,
+            'action': [] if rbc else [r.heat_pump_action, r.battery_power],
+            'reward': g('reward'), 'updated': i,
+        }
+        clean = lambda v: None if isinstance(v, float) and not math.isfinite(v) else v
+        state = {k: ([clean(float(x)) for x in v] if isinstance(v, list) else
+                     clean(float(v)) if isinstance(v, (int, float, np.number)) and not isinstance(v, bool) else v)
+                 for k, v in state.items()}
+        self.anim_view.page().runJavaScript(f'window.applyState && window.applyState({json.dumps(state)})')
+
+    def _draw_reward_parts(self, ax, name: str, upto: int):
+        d = self._runs[name].iloc[:upto]
+        plot_reward_parts(ax, d.t.to_numpy(), d, width=0.85, title=name)
 
     def _update_kpis(self):
         names = list(self._kpis)

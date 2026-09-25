@@ -17,23 +17,26 @@ import time
 from collections import deque
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import psutil
 import requests
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QDoubleSpinBox, QFormLayout, QGroupBox,
                                QHBoxLayout, QLabel, QLineEdit, QMessageBox, QProgressDialog, QPushButton,
-                               QRadioButton, QScrollArea, QSpinBox, QTabWidget, QVBoxLayout, QWidget)
+                               QRadioButton, QScrollArea, QSpinBox, QSplitter, QTabWidget, QVBoxLayout,
+                               QWidget)
 
 from logic.envs import URL as BOPTEST_URL
-from logic.live_control import (ALGOS, MAX_PARALLEL_TRAININGS, RECOMMENDED, load_yaml_preset, paths_for,
-                                read_control, read_status, run_tag, variant_for_w, write_control,
+from logic.live_control import (ALGOS, MAX_PARALLEL_TRAININGS, RECOMMENDED, anim_path_for, load_yaml_preset,
+                                paths_for, read_control, read_status, run_tag, variant_for_w, write_control,
                                 write_json)
 from gui.compare_view import CompareView
 from gui.reward_form import RewardForm
-from gui.watch_view import WatchView
+from gui.watch_view import ANIM_PAGE, WatchView, plot_reward_parts
 
 # Zeitfenster (Sekunden), über das die Trainingsgeschwindigkeit für die Restzeit-Schätzung
 # gemittelt wird — lang genug gegen Ausreißer, kurz genug, um Tempowechsel mitzubekommen.
@@ -235,6 +238,7 @@ class AgentView(QWidget):
         # Lauf-Name (z. B. 'sac_seed0' oder 'sac_seed0_w0_3') -> {'proc' (None = wartet noch),
         # 'queued', 'cmd', 'algo', 'label', 'seed', 'paths', 'logfile', 'eval_freq', 'samples'}
         self.jobs: dict[str, dict] = {}
+        self._study = None   # laufende Komfortgewicht-Studie: {'runs': [...], 'models': [...]}
         self._known_models: set[str] = set()
         self._build_ui()
         self._reattach_running()
@@ -307,13 +311,28 @@ class AgentView(QWidget):
         train_layout.addWidget(self.status_label)
         self.figure = Figure(figsize=(7, 4), constrained_layout=True)
         self.canvas = FigureCanvas(self.figure)
-        train_layout.addWidget(self.canvas, 1)
+        # Oben die Animation des laufenden Trainings, unten die Lernkurve — beide gleichzeitig,
+        # Trennlinie verschiebbar.
+        self.train_anim = QWebEngineView()
+        anim_url = QUrl.fromLocalFile(str(ANIM_PAGE))
+        anim_url.setQuery('embedded=1')
+        self.train_anim.setUrl(anim_url)
+        self.train_anim.loadFinished.connect(lambda _ok: self._push_train_anim(force=True))
+        self._anim_sent = None
+        splitter = QSplitter(Qt.Vertical)
+        splitter.addWidget(self.train_anim)
+        splitter.addWidget(self.canvas)
+        splitter.setSizes([420, 480])
+        train_layout.addWidget(splitter, 1)
+        self.anim_timer = QTimer(self)
+        self.anim_timer.timeout.connect(self._push_train_anim)
+        self.anim_timer.start(600)
         sub_tabs.addTab(train_tab, 'Training')
 
         self.watch_view = WatchView(self.models_dir)
         sub_tabs.addTab(self.watch_view, 'Beobachten')
         self.compare_view = CompareView(self.models_dir, self.root / 'results' / 'compare.csv',
-                                        can_run=self._compare_allowed)
+                                        can_run=self._compare_allowed, start_study=self.start_study)
         sub_tabs.addTab(self.compare_view, 'Vergleich')
         sub_tabs.currentChanged.connect(lambda i: i == 1 and self.watch_view.reload_models())
 
@@ -346,17 +365,16 @@ class AgentView(QWidget):
         if not selected:
             QMessageBox.warning(self, 'Kein Algorithmus gewählt', 'Bitte mindestens einen Algorithmus auswählen.')
             return
-        try:
-            weights = self.reward_form.study_weight_list()
-        except ValueError as e:
-            QMessageBox.warning(self, 'w-Werte ungültig', str(e))
-            return
-        seed = self.seed_spin.value()
-        reward_kwargs = self.reward_form.values()
-        variants = ([(variant_for_w(w), {**reward_kwargs, 'w_comfort': w}) for w in weights]
-                    if weights else [(None, reward_kwargs)])
+        self._queue_runs(selected, [(None, self.reward_form.values())])
+        self._start_queued()
+        self._refresh_panel()
 
-        for algo in selected:
+    def _queue_runs(self, algos, variants) -> list[str]:
+        """Je Algorithmus und Variante (Name oder None, Belohnungsparameter) einen Lauf in die
+        Warteschlange stellen. Hyperparameter aus den Formularen links. Gibt die Lauf-Namen zurück."""
+        seed = self.seed_spin.value()
+        tags = []
+        for algo in algos:
             hp = self.forms[algo].values()
             if algo == 'PPO' and hp['params']['n_steps'] % hp['params']['batch_size'] != 0:
                 QMessageBox.warning(self, 'PPO nicht gestartet', 'n_steps muss durch batch_size teilbar sein.')
@@ -365,6 +383,7 @@ class AgentView(QWidget):
                 tag = run_tag(algo, seed, variant)
                 existing = self.jobs.get(tag)
                 if existing and (existing.get('queued') or tag in self._running_jobs()):
+                    tags.append(tag)
                     continue  # läuft schon / wartet schon
                 paths = paths_for(algo, seed, self.root, variant)
                 write_control(paths['control'], pause=False, stop=False)
@@ -382,8 +401,49 @@ class AgentView(QWidget):
                 self.jobs[tag] = {'proc': None, 'queued': True, 'cmd': cmd, 'algo': algo,
                                   'label': self._label(algo, variant), 'seed': seed, 'paths': paths,
                                   'logfile': None, 'eval_freq': hp['eval_freq'], 'samples': deque()}
+                tags.append(tag)
+        return tags
+
+    def start_study(self, weights: list[float], algos: list[str], skip_existing: bool) -> dict:
+        """Komfortgewicht-Studie (aus dem Reiter "Vergleich"): je Algorithmus und w ein Lauf mit
+        sonst gleicher Belohnung (Formular links). skip_existing: w-Werte, für die schon ein
+        Modell existiert, nicht neu trainieren. Nach dem letzten Lauf vergleicht der Reiter
+        "Vergleich" automatisch (siehe _refresh_panel)."""
+        seed = self.seed_spin.value()
+        reward_kwargs = self.reward_form.values()
+        to_train, reused = [], []
+        for algo in algos:
+            for w in weights:
+                variant = variant_for_w(w)
+                tag = run_tag(algo, seed, variant)
+                if skip_existing and (self.models_dir / f'{tag}.zip').exists():
+                    reused.append(tag)
+                else:
+                    to_train.append((algo, variant, {**reward_kwargs, 'w_comfort': w}))
+        started = []
+        for algo, variant, rkw in to_train:
+            started += self._queue_runs([algo], [(variant, rkw)])
+        self._study = {'runs': started, 'models': started + reused}
         self._start_queued()
         self._refresh_panel()
+        return {'started': started, 'reused': reused}
+
+    def _study_status(self):
+        """Fortschritt der laufenden Studie an den Reiter "Vergleich" melden; ist alles fertig,
+        dort automatisch vergleichen."""
+        study = getattr(self, '_study', None)
+        if not study:
+            return
+        active = self._running_jobs().keys() | self._queued_jobs().keys()
+        open_runs = [t for t in study['runs'] if t in active]
+        done = len(study['runs']) - len(open_runs)
+        if open_runs:
+            self.compare_view.set_study_status(
+                f'Studie: {done} von {len(study["runs"])} Trainings fertig — Fortschritt im Reiter '
+                '„Training“. Danach wird automatisch verglichen.')
+            return
+        self._study = None
+        self.compare_view.study_finished(study['models'])
 
     def _start_queued(self):
         """Wartende Läufe starten, solange BOPTEST-Worker frei sind (je Training zwei: Training +
@@ -534,8 +594,29 @@ class AgentView(QWidget):
         eta = 'unter 1 min' if minutes < 1 else f'ca. {minutes:.0f} min'
         return f'{target} — noch {eta} ({rate:.1f} Schritte/s)'
 
+    def _push_train_anim(self, force: bool = False):
+        """Neuesten Animationszustand des laufenden (sonst zuletzt gestarteten) Laufs an die
+        Animation oben im Training-Reiter geben — geschrieben von
+        logic/training.py::LiveCallback, beim Training wie bei den Auswertungen."""
+        jobs = getattr(self, 'jobs', {})
+        candidates = list(self._running_jobs().values()) or [j for j in jobs.values() if not j.get('queued')]
+        if not candidates:
+            return
+        job = candidates[-1]
+        try:
+            text = anim_path_for(job['paths']['status']).read_text(encoding='utf-8')
+            state = json.loads(text)
+        except (OSError, ValueError):   # noch nichts geschrieben oder gerade ersetzt
+            return
+        if not force and text == self._anim_sent:
+            return
+        self._anim_sent = text
+        state['strategy'] = f"{job['label']} · {state.get('strategy', '')}"
+        self.train_anim.page().runJavaScript(f'window.applyState && window.applyState({json.dumps(state)})')
+
     def _refresh_panel(self):
         self._start_queued()
+        self._study_status()
         running = bool(self._running_jobs())
         active = running or bool(self._queued_jobs())
         for btn in (self.pause_btn, self.resume_btn):
@@ -546,9 +627,7 @@ class AgentView(QWidget):
             return
         lines = []
         pending = []   # Restzeit-Hinweise für den Platzhalter, solange noch keine Kurve da ist
-        any_data = False
-        self.figure.clear()
-        ax = self.figure.add_subplot(111)
+        curves = []    # (Beschriftung, Lernkurven-DataFrame) je Lauf mit mindestens einer Auswertung
         for job in self.jobs.values():
             label = job['label']
             status = read_status(job['paths']['status'])
@@ -588,14 +667,30 @@ class AgentView(QWidget):
                 except Exception:
                     d = pd.DataFrame()
                 if not d.empty:
-                    any_data = True
-                    ax.plot(d.timesteps, d.reward, marker='o', label=label)
+                    curves.append((label, d))
 
         self.status_label.setText('\n'.join(lines))
-        if any_data:
-            ax.set_xlabel('Zeitschritte')
+        self.figure.clear()
+        # Unter der Lernkurve je Lauf eine Reihe mit den Belohnungsanteilen je Auswertung
+        # (Spalten reward_cost … aus logic/training.py::LiveCallback; ältere Läufe haben sie nicht).
+        with_parts = [(label, d) for label, d in curves if 'reward_cost' in d]
+        if with_parts:
+            axes = self.figure.subplots(1 + len(with_parts), 1, sharex=True,
+                                        height_ratios=[2] + [1] * len(with_parts))
+            ax = axes[0]
+        else:
+            ax = self.figure.add_subplot(111)
+        if curves:
+            for label, d in curves:
+                ax.plot(d.timesteps, d.reward, marker='o', label=label)
             ax.set_ylabel('Ø Belohnung (Testzeitraum)')
             ax.legend()
+            for part_ax, (label, d) in zip(axes[1:] if with_parts else [], with_parts):
+                steps = d.timesteps.to_numpy(dtype=float)
+                gap = np.diff(steps).min() if len(steps) > 1 else steps[0]
+                plot_reward_parts(part_ax, steps, d, width=0.7 * gap, title=label, clip_terminal=False)
+                part_ax.set_ylabel('Anteile', fontsize=8)
+            (axes[-1] if with_parts else ax).set_xlabel('Zeitschritte')
         else:
             text = 'Lernkurve erscheint hier, sobald die erste Auswertung durchgelaufen ist.'
             if pending:

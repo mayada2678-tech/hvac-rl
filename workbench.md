@@ -84,7 +84,8 @@ Zur Einordnung: w_comfort = 1 heißt für dieses Gebäude 1 K·h Komfortverletzu
 Stromkosten — Komfort ist damit fast eine harte Grenze, gespart wird über Zeitverschiebung
 und Batterie innerhalb des Komfortbands. Die Einzelanteile stehen im `info`-Dict
 (`reward_cost`, `reward_comfort`, `reward_battery`, `reward_terminal`, zusammen = r) und in
-den Aufzeichnungen von `logic/watch.py::record()`.
+den Aufzeichnungen von `logic/watch.py::record()`; der Reiter "Beobachten" zeigt sie als
+gestapelte Balken je Schritt (für die zuletzt gewählte Strategie).
 
 ## Batterie & PV-Anlage — komplett in Python, unabhängig von BOPTEST
 
@@ -191,26 +192,38 @@ Studie trainiert mehrere Varianten, die sich **nur im Komfortgewicht w** untersc
 stellt sie auf derselben Testperiode dem RBC gegenüber:
 „Bei w=1 kaum Ersparnis, bei w=0.1 sparen wir X %, aber Y K·h Komfortverletzung.“
 
-1. **Belohnungsformular → „Komfortgewicht-Studie“** aktivieren, w-Werte eingeben (Standard
-   `1.0, 0.3, 0.1`; Dezimalkomma geht auch: `1,0; 0,3; 0,1`). „▶ Start“ legt je Algorithmus
-   und w einen Lauf an: `runs/live/sac_seed0_w0_3.*`, Modell `models/sac_seed0_w0_3.zip`
-   (`logic/live_control.py::run_tag()`). Neben jedem Modell legt `logic/training.py` eine
-   `models/<name>.json` mit den Belohnungsparametern ab — daher weiß der Vergleich, mit
-   welchem w ein Modell trainiert wurde.
+1. **Reiter „Vergleich“ → „🧪 Komfortgewicht-Studie“:** beliebig viele w-Werte eingeben
+   (Standard `1.0, 0.3, 0.1`; Dezimalkomma geht auch: `1,0; 0,3; 0,1`, Parser
+   `logic/live_control.py::parse_weights()`), Algorithmen wählen, „▶ Trainieren & vergleichen“.
+   Je Algorithmus und w entsteht ein Lauf, z. B. `runs/live/sac_seed0_w0_3.*` →
+   `models/sac_seed0_w0_3.zip` (`run_tag()`/`variant_for_w()`, bewusst ohne Punkt im Namen:
+   SB3 hielte `.3` sonst für die Dateiendung). Hyperparameter und übrige Belohnungswerte kommen
+   aus den Formularen im Reiter „Agent“ (`AgentView.start_study()`). Mit „Bereits trainierte w
+   wiederverwenden“ werden vorhandene Modelle nicht neu trainiert; eine Vorschau zeigt vorab,
+   wie viele Trainings entstehen. Neben jedem Modell legt `logic/training.py` eine
+   `models/<name>.json` mit den Belohnungsparametern ab — daher kennt der Vergleich das w.
+   Sind alle Trainings der Studie fertig, vergleicht der Reiter automatisch und hakt genau
+   die Studien-Modelle + RBC an (`CompareView.study_finished()`).
 2. **Warteschlange:** jedes Training belegt zwei BOPTEST-Worker (Training + Auswertung), bei
    6 Workern laufen also höchstens 3 gleichzeitig (`MAX_PARALLEL_TRAININGS`). Weitere Läufe
    stehen auf „⏳ wartet auf freie BOPTEST-Worker“ und starten automatisch; „⏹ Stopp“
    verwirft wartende Läufe.
 3. **Reiter „Vergleich“** (`gui/compare_view.py`, Logik in `logic/evaluation.py::compare()`):
-   RBC + alle Modelle (ohne `*_final`) je eine Testepisode, im Hintergrund-Thread. Kennzahlen:
-   Stromkosten **inkl. Batterie/PV** (Summe `info['step_cost']` — BOPTESTs `cost_tot` kennt
-   beide nicht), Ersparnis ggü. RBC in %, Komfortverletzung `tdis_tot` (K·h), Netzbezug (kWh).
-   Anzeige als Kosten-über-Komfort-Diagramm (je Algorithmus eine Kurve über w, RBC als Stern
-   mit gestrichelter Kostenlinie, Details beim Überfahren mit der Maus), Tabelle und fertigen
-   Sätzen zum Kopieren (`summary_sentences()`). Ergebnisse werden in `results/compare.csv`
-   zwischengespeichert; nur neue/neu trainierte Modelle (Dateizeit) werden neu simuliert.
-   Der Vergleich braucht selbst einen Worker — sind alle durch Trainings belegt, wird er
-   nicht gestartet.
+   RBC + alle Modelle (ohne `*_final`) je eine Testepisode, im Hintergrund-Thread. Gespeichert
+   werden die Stromkosten **inkl. Batterie/PV** (Summe `info['step_cost']` — BOPTESTs
+   `cost_tot` kennt beide nicht), Netzbezug, Komfortverletzung `tdis_tot` und **alle übrigen
+   BOPTEST-KPIs** (Energie, CO₂, Spitzenlasten, …; Katalog `METRICS`). **Frei wählbar:**
+   - **x- und y-Achse** — jede Kennzahl mit Werten (leere wie Gas-Spitzenlast bei einer
+     Wärmepumpe werden ausgeblendet), ⇄ tauscht die Achsen. Standard: Kosten über Komfort.
+     Der Hinweis „Besser = unten links“ richtet sich nach der Richtung der gewählten Kennzahlen.
+   - **Referenz** — RBC oder ein beliebiges Modell; daran bemessen sich „Ersparnis ggü.
+     Referenz (%)“ (`savings_vs()`), die gestrichelten Linien und die Sätze
+     (`summary_sentences(df, reference, names)`).
+   - **Modelle** — Haken in der Liste rechts blenden Modelle aus Diagramm, Tabelle und Sätzen aus.
+   Je Algorithmus verbindet eine Linie die w-Varianten (Kurve), Details beim Überfahren mit
+   der Maus. Ergebnisse werden in `results/compare.csv` zwischengespeichert (`CACHE_VERSION`);
+   nur neue/neu trainierte Modelle (Dateizeit) werden neu simuliert. Der Vergleich braucht
+   selbst einen Worker — sind alle durch Trainings belegt, wird er nicht gestartet.
 
 ## Seite "Datensatz": jeder BOPTEST-Testfall live erkundbar, nicht nur einer
 

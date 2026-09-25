@@ -7,6 +7,7 @@ kein gemeinsamer Speicher, funktioniert deshalb unter Windows problemlos und
 das Training läuft unabhängig vom Streamlit-Prozess weiter.
 """
 import json
+import re
 from pathlib import Path
 
 import yaml
@@ -68,6 +69,26 @@ def run_tag(algo: str, seed: int, variant: str | None = None) -> str:
     return f'{tag}_{variant}' if variant else tag
 
 
+# Standard der Komfortgewicht-Studie (Reiter "Vergleich"): BOPTEST-Gym-Standard bis kostenbetont.
+DEFAULT_STUDY_WEIGHTS = '1.0, 0.3, 0.1'
+
+
+def parse_weights(text: str) -> list[float]:
+    """'1.0, 0.3, 0.1' oder mit Dezimalkomma '1,0; 0,3; 0,1' -> [1.0, 0.3, 0.1]. Beliebig viele
+    Werte; Doppelte entfernt, Reihenfolge bleibt. ValueError mit verständlicher Meldung."""
+    # Komma zwischen zwei Ziffern = Dezimalzeichen, alle übrigen Kommas/Semikolons/Leerzeichen trennen.
+    text = re.sub(r'(\d),(\d)', r'\1.\2', text.strip())
+    try:
+        weights = [float(p) for p in re.split(r'[\s,;]+', text) if p]
+    except ValueError:
+        raise ValueError('Die w-Werte bitte als Zahlen eingeben, getrennt durch Komma oder Semikolon, '
+                         'z. B. 1.0, 0.3, 0.1 oder 1,0; 0,3; 0,1')
+    weights = list(dict.fromkeys(weights))
+    if not weights or any(w < 0 for w in weights):
+        raise ValueError('Mindestens ein w-Wert, keiner negativ.')
+    return weights
+
+
 def variant_for_w(w: float) -> str:
     """'w0_3' für w=0.3 — bewusst ohne Punkt: Stable-Baselines3 hält sonst '.3' für die
     Dateiendung und speichert das Modell ohne '.zip' (dann taucht es nirgends mehr auf)."""
@@ -86,7 +107,15 @@ def paths_for(algo: str, seed: int, root: Path, variant: str | None = None) -> d
         'control': run_dir / f'{tag}.control.json',
         'status': run_dir / f'{tag}.status.json',
         'log': run_dir / f'{tag}.log',
+        'anim': anim_path_for(run_dir / f'{tag}.status.json'),
     }
+
+
+def anim_path_for(status_path: Path) -> Path:
+    """Animationszustand eines Laufs (von logic/training.py::LiveCallback geschrieben) — neben
+    der Statusdatei, damit der Trainingsprozess ihn nur aus --status ableiten muss."""
+    status_path = Path(status_path)
+    return status_path.with_name(status_path.name.replace('.status.json', '') + '.anim.json')
 
 
 def read_json(path, default):

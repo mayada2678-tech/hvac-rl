@@ -27,7 +27,9 @@ from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.monitor import Monitor
 
 from logic.envs import make_env
-from logic.live_control import read_control, write_json
+from logic.live_control import anim_path_for, read_control, write_json
+from logic.reward import REWARD_PARTS
+from logic.watch import anim_state, write_anim_state
 
 ALGOS = {'SAC': SAC, 'TD3': TD3, 'PPO': PPO}
 
@@ -64,6 +66,19 @@ class LiveCallback(BaseCallback):
         self.best = -np.inf
         self._ctrl = {'pause': False, 'stop': False}
         self._last_poll = 0.0
+        self._eval_parts = dict.fromkeys(REWARD_PARTS, 0.0)
+        # Animation im Training-Reiter (gui/agent_view.py): aktueller Zustand, höchstens alle
+        # 0,5 s geschrieben — beim Training aus der Trainingsumgebung, während einer Auswertung
+        # aus der Testepisode.
+        self.anim_path = anim_path_for(self.status_path) if self.status_path else None
+        self._last_anim = 0.0
+
+    def _write_anim(self, info, phase, step, done, reward, force=False):
+        now = time.time()
+        if self.anim_path is None or not info or (not force and now - self._last_anim < 0.5):
+            return
+        self._last_anim = now
+        write_anim_state(self.anim_path, anim_state(info, phase, step, done=done, reward=reward))
 
     def _poll_control(self):
         if self.control_path is None:
@@ -79,10 +94,23 @@ class LiveCallback(BaseCallback):
             write_json(self.status_path, **self.status_extra, **kwargs)
 
     def _check_stop_during_eval(self, _locals, _globals):
+        # evaluate_policy ruft das je Schritt mit seinen lokalen Variablen auf — `info` trägt die
+        # Einzelanteile der Belohnung aus logic/reward.py::RewardWrapper.
+        info = _locals.get('info') or {}
+        for k in REWARD_PARTS:
+            self._eval_parts[k] += float(info.get(k, 0.0))
+        i = _locals.get('i', 0)
+        self._write_anim(info, 'Auswertung', int(_locals['current_lengths'][i]),
+                         bool(_locals.get('done')), _locals.get('reward'), force=True)
         if self._poll_control().get('stop'):
             raise StopRequested
 
     def _on_step(self) -> bool:
+        infos, dones = self.locals.get('infos') or [{}], self.locals.get('dones')
+        done = bool(dones[0]) if dones is not None else False
+        rewards = self.locals.get('rewards')
+        self._write_anim(infos[0], 'Training', self.num_timesteps, done,
+                         None if rewards is None else float(rewards[0]))
         ctrl = self._poll_control()
         if ctrl.get('stop'):
             self._write_status(phase='gestoppt', timesteps=self.num_timesteps)
@@ -98,6 +126,7 @@ class LiveCallback(BaseCallback):
 
         if self.num_timesteps % self.eval_freq == 0:
             self._write_status(phase='läuft', timesteps=self.num_timesteps, evaluating=True)
+            self._eval_parts = dict.fromkeys(REWARD_PARTS, 0.0)
             try:
                 mean_r, _ = evaluate_policy(self.model, self.eval_env, n_eval_episodes=self.n_eval_episodes,
                                             deterministic=True, callback=self._check_stop_during_eval)
@@ -106,10 +135,12 @@ class LiveCallback(BaseCallback):
                 return False
             if self.csv_path is not None:
                 new = not self.csv_path.exists()
+                # Anteile wie mean_r als Mittel je Testepisode (zusammen = mean_r).
+                parts = [self._eval_parts[k] / self.n_eval_episodes for k in REWARD_PARTS]
                 with open(self.csv_path, 'a') as f:
                     if new:
-                        f.write('timesteps,reward\n')
-                    f.write(f'{self.num_timesteps},{mean_r}\n')
+                        f.write(','.join(['timesteps', 'reward', *REWARD_PARTS]) + '\n')
+                    f.write(','.join(str(v) for v in [self.num_timesteps, mean_r, *parts]) + '\n')
             if self.best_model_dir is not None and mean_r > self.best:
                 self.best = mean_r
                 self.best_model_dir.mkdir(parents=True, exist_ok=True)
