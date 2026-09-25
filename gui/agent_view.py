@@ -30,13 +30,26 @@ from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QDoubleSpi
                                QRadioButton, QScrollArea, QSpinBox, QSplitter, QTabWidget, QVBoxLayout,
                                QWidget)
 
-from logic.envs import URL as BOPTEST_URL
-from logic.live_control import (ALGOS, MAX_PARALLEL_TRAININGS, RECOMMENDED, anim_path_for, load_yaml_preset,
-                                paths_for, read_control, read_status, run_tag, variant_for_w, write_control,
+from logic.envs import STEP_PERIOD, TEST_LENGTH, URL as BOPTEST_URL
+from logic.live_control import (ALGOS, MAX_PARALLEL_TRAININGS, RECOMMENDED, anim_path_for,
+                                episodes_path_for, load_yaml_preset, paths_for, read_control, read_status, run_tag, variant_for_w, write_control,
                                 write_json)
 from gui.compare_view import CompareView
 from gui.reward_form import RewardForm
 from gui.watch_view import ANIM_PAGE, WatchView, plot_reward_parts
+
+# Länge der Testperiode in Regelschritten (72 h) — Trainingsepisoden werden auf diese Länge
+# umgerechnet, damit sie mit den Auswertungen auf einer Skala liegen.
+TEST_STEPS = TEST_LENGTH // STEP_PERIOD
+
+
+def _read_csv(path: Path) -> pd.DataFrame:
+    """CSV lesen, die ein Trainingsprozess gerade schreibt — fehlt sie noch oder ist die letzte
+    Zeile halb geschrieben, einfach leer statt Fehler."""
+    try:
+        return pd.read_csv(path) if path.exists() else pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
 
 # Zeitfenster (Sekunden), über das die Trainingsgeschwindigkeit für die Restzeit-Schätzung
 # gemittelt wird — lang genug gegen Ausreißer, kurz genug, um Tempowechsel mitzubekommen.
@@ -391,8 +404,10 @@ class AgentView(QWidget):
                           'eval_freq': hp['eval_freq'], 'reward': rkw, 'params': hp['params'],
                           'net_arch': hp['net_arch']}
                 paths['run_config'].write_text(json.dumps(run_cfg, indent=2))
-                if paths['csv'].exists():
-                    paths['csv'].unlink()   # alte Lernkurve eines früheren Laufs gleichen Namens
+                # alte Lernkurve/Episoden/Animation eines früheren Laufs gleichen Namens
+                for old in (paths['csv'], episodes_path_for(paths['csv']), anim_path_for(paths['status'])):
+                    if old.exists():
+                        old.unlink()
                 write_json(paths['status'], phase='wartet', timesteps=0)
                 cmd = [sys.executable, '-m', 'logic.training',
                       '--algo', algo, '--config', str(paths['run_config']), '--seed', str(seed),
@@ -628,7 +643,8 @@ class AgentView(QWidget):
         lines = []
         pending = []   # Restzeit-Hinweise für den Platzhalter, solange noch keine Kurve da ist
         curves = []    # (Beschriftung, Lernkurven-DataFrame) je Lauf mit mindestens einer Auswertung
-        for job in self.jobs.values():
+        series = []    # (Beschriftung, Farbe, Auswertungen, Trainingsepisoden) je Lauf mit Daten
+        for job_key, job in self.jobs.items():
             label = job['label']
             status = read_status(job['paths']['status'])
             phase = status.get('phase', 'unbekannt')
@@ -660,14 +676,13 @@ class AgentView(QWidget):
                 lines.append(f"    ⏱ {eta}")
                 pending.append(f"{label}: {eta}")
 
-            csv_path = job['paths']['csv']
-            if csv_path.exists():
-                try:
-                    d = pd.read_csv(csv_path)
-                except Exception:
-                    d = pd.DataFrame()
-                if not d.empty:
-                    curves.append((label, d))
+            color = f'C{list(self.jobs).index(job_key) % 10}'   # feste Farbe je Lauf
+            d = _read_csv(job['paths']['csv'])
+            e = _read_csv(episodes_path_for(job['paths']['csv']))
+            if not d.empty:
+                curves.append((label, d))
+            if not d.empty or not e.empty:
+                series.append((label, color, d, e))
 
         self.status_label.setText('\n'.join(lines))
         self.figure.clear()
@@ -680,11 +695,22 @@ class AgentView(QWidget):
             ax = axes[0]
         else:
             ax = self.figure.add_subplot(111)
-        if curves:
-            for label, d in curves:
-                ax.plot(d.timesteps, d.reward, marker='o', label=label)
-            ax.set_ylabel('Ø Belohnung (Testzeitraum)')
-            ax.legend()
+        if series:
+            for label, color, d, e in series:
+                # Trainingsepisoden: blass, weil jede eine andere zufällige Woche mit
+                # Erkundungsrauschen ist. Eine Woche = 168 h, die Testperiode 72 h — deshalb
+                # je Stunde umgerechnet, damit beide Linien dieselbe Skala haben.
+                if not e.empty:
+                    ax.plot(e.timesteps, e.reward / e.length * TEST_STEPS, color=color, lw=1, alpha=0.35,
+                            marker='.', markersize=4, label=f'{label} · Training (Woche, auf 72 h umgerechnet)')
+                if not d.empty:
+                    ax.plot(d.timesteps, d.reward, color=color, lw=2, marker='o',
+                            label=f'{label} · Auswertung (Testzeitraum)')
+            ax.set_ylabel('Belohnung je 72 h')
+            ax.legend(fontsize=8)
+            if not curves and pending:   # nur Trainingsepisoden bisher — sagen, wann mehr kommt
+                ax.text(0.5, 0.03, '\n'.join(pending), ha='center', va='bottom', transform=ax.transAxes,
+                        fontsize=8, color='#8A98A3')
             for part_ax, (label, d) in zip(axes[1:] if with_parts else [], with_parts):
                 steps = d.timesteps.to_numpy(dtype=float)
                 gap = np.diff(steps).min() if len(steps) > 1 else steps[0]
@@ -692,7 +718,8 @@ class AgentView(QWidget):
                 part_ax.set_ylabel('Anteile', fontsize=8)
             (axes[-1] if with_parts else ax).set_xlabel('Zeitschritte')
         else:
-            text = 'Lernkurve erscheint hier, sobald die erste Auswertung durchgelaufen ist.'
+            text = ('Lernkurve erscheint hier nach der ersten Trainingsepisode (blass) '
+                    'bzw. der ersten Auswertung (kräftig).')
             if pending:
                 text += '\n\n' + '\n'.join(pending)
             ax.text(0.5, 0.5, text, ha='center', va='center', transform=ax.transAxes, fontsize=9,

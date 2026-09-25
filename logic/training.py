@@ -27,7 +27,7 @@ from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.monitor import Monitor
 
 from logic.envs import make_env
-from logic.live_control import anim_path_for, read_control, write_json
+from logic.live_control import anim_path_for, episodes_path_for, read_control, write_json
 from logic.reward import REWARD_PARTS
 from logic.watch import anim_state, write_anim_state
 
@@ -72,6 +72,9 @@ class LiveCallback(BaseCallback):
         # aus der Testepisode.
         self.anim_path = anim_path_for(self.status_path) if self.status_path else None
         self._last_anim = 0.0
+        # Belohnung jeder Trainingsepisode (vom Monitor-Wrapper), für die blasse Linie in der
+        # Lernkurve — erscheint viel früher als die erste Auswertung.
+        self.episodes_path = episodes_path_for(self.csv_path) if self.csv_path else None
 
     def _write_anim(self, info, phase, step, done, reward, force=False):
         now = time.time()
@@ -111,6 +114,13 @@ class LiveCallback(BaseCallback):
         rewards = self.locals.get('rewards')
         self._write_anim(infos[0], 'Training', self.num_timesteps, done,
                          None if rewards is None else float(rewards[0]))
+        episode = infos[0].get('episode')   # nur am Episodenende gesetzt (Monitor)
+        if episode and self.episodes_path is not None:
+            new = not self.episodes_path.exists()
+            with open(self.episodes_path, 'a') as f:
+                if new:
+                    f.write('timesteps,reward,length\n')
+                f.write(f"{self.num_timesteps},{float(episode['r'])},{int(episode['l'])}\n")
         ctrl = self._poll_control()
         if ctrl.get('stop'):
             self._write_status(phase='gestoppt', timesteps=self.num_timesteps)
@@ -224,8 +234,9 @@ def _train(algo, cfg, seed, total_timesteps, env, eval_env, reward,
     if live:
         if csv_path:
             Path(csv_path).parent.mkdir(parents=True, exist_ok=True)
-            if Path(csv_path).exists():
-                Path(csv_path).unlink()
+            for old in (Path(csv_path), episodes_path_for(csv_path)):
+                if old.exists():
+                    old.unlink()
         # Absichtlich KEIN Reset von control_path hier: Modellaufbau oben kann je nach
         # Systemlast spürbar dauern, und ein Reset an dieser Stelle würde einen Stopp/Pause-
         # Klick, der genau in diesem Fenster kam, stillschweigend überschreiben (realer Bug,

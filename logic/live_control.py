@@ -111,6 +111,13 @@ def paths_for(algo: str, seed: int, root: Path, variant: str | None = None) -> d
     }
 
 
+def episodes_path_for(csv_path: Path) -> Path:
+    """Belohnung je Trainingsepisode (logic/training.py::LiveCallback) — neben der
+    Lernkurven-CSV, damit der Trainingsprozess sie nur aus --csv ableiten muss."""
+    csv_path = Path(csv_path)
+    return csv_path.with_name(csv_path.stem + '.episodes.csv')
+
+
 def anim_path_for(status_path: Path) -> Path:
     """Animationszustand eines Laufs (von logic/training.py::LiveCallback geschrieben) — neben
     der Statusdatei, damit der Trainingsprozess ihn nur aus --status ableiten muss."""
