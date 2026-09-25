@@ -70,27 +70,24 @@ def anim_state(info: dict, strategy: str, step: int, n_steps: int | None = None,
     }
 
 
-def policy_from(name_or_model, split='test', normalize=True):
+def policy_from(name_or_model, split='test'):
     """Gibt (env, act_fn) zurück. name: 'rbc' | ein geladenes SB3-Modell. `env` ist die
     batteriefähige Umgebung (logic.battery_env.BatteryEnv), die eine BOPTEST-Umgebung umhüllt
     — siehe logic/envs.py::make_env()."""
-    env = make_env(split, normalize=normalize)
+    env = make_env(split)
     if isinstance(name_or_model, str):
         agent = build(name_or_model, env)
         return env, lambda obs: agent.predict(obs)[0]
     return env, lambda obs: name_or_model.predict(obs, deterministic=True)[0]
 
 
-def record(name_or_model, split='test', anim_state_path: Path | None = ANIM_STATE_PATH,
-           normalize: bool = True) -> tuple[pd.DataFrame, dict]:
+def record(name_or_model, split='test', anim_state_path: Path | None = ANIM_STATE_PATH) -> tuple[pd.DataFrame, dict]:
     """Eine Testepisode durchspielen. Ergebnis: (DataFrame mit einer Zeile je Stunde —
     Spalten t, hour, indoor, setpoint_heat, setpoint_cool, outdoor, heat_pump_action,
     battery_power, battery_soc, solar_power, grid_power, heat_pump_power, price, reward, reward_cost,
     reward_comfort, reward_battery, reward_terminal —, BOPTESTs offizielle
-    KPIs für diese Episode). anim_state_path=None schaltet die Live-Datei ab. normalize=False
-    für Modelle, die vor der Beobachtungs-Normierung trainiert wurden (logic/evaluation.py::
-    obs_normalized)."""
-    env, act = policy_from(name_or_model, split, normalize)
+    KPIs für diese Episode). anim_state_path=None schaltet die Live-Datei ab."""
+    env, act = policy_from(name_or_model, split)
     base = env.unwrapped
     obs, info = env.reset()
 

@@ -18,10 +18,16 @@ from logic.reward import RewardWrapper
 from logic.solar_env import SolarEnv
 
 URL = 'http://127.0.0.1:8000'
+
+# Version der Umgebung aus Sicht eines Modells (Beobachtungen, Normierung, Preisszenario).
+# Erhöhen, wenn sich etwas davon ändert — Modelle mit anderer Version passen nicht mehr und
+# werden in "Beobachten"/"Vergleich" ausgelassen (logic/evaluation.py::env_compatible).
+# 2 = Beobachtungen auf [-1, 1] normiert + Börsenpreis 'highly_dynamic'.
+ENV_VERSION = 2
 TESTCASE = 'bestest_hydronic_heat_pump'
 
 # Beobachtungen: Zonentemperatur + Komfortband, Außentemperatur, Solareinstrahlung,
-# dynamischer Strompreis — alles, was ein vorausschauender Agent braucht, um günstigen Strom
+# stündlicher Börsenstrompreis — alles, was ein vorausschauender Agent braucht, um günstigen Strom
 # zu nutzen, ohne den Komfort zu verletzen. `time` normalisiert auf eine Wochenperiode, damit
 # der Agent Wochentag/Uhrzeit-Muster erkennen kann. BatteryEnv/SolarEnv hängen zusätzlich
 # Ladezustand bzw. aktuelle PV-Erzeugung an (siehe dort) — hier nur die BOPTEST-seitigen.
@@ -31,7 +37,12 @@ OBSERVATIONS = {
     'TDryBul': (265., 303.),                       # Außentemperatur (K)
     'HDirNor': (0., 862.),                          # Direkte Solareinstrahlung (W/m²)
     'InternalGainsRad[1]': (0., 219.),                # Interne Wärmelasten (W)
-    'PriceElectricPowerDynamic': (-0.4, 0.4),           # Dynamischer Strompreis
+    # Börsenstrompreis (€/kWh, Szenario 'highly_dynamic', stündlich wechselnd). Grenzen bewusst
+    # eng um die typischen Werte (Jahr: 99 % der Stunden zwischen 0,19 und 0,29, Tagesspanne im
+    # Median 2,7 ct), damit das Preissignal nach der Normierung sichtbar bleibt. Die seltenen
+    # Ausreißer (16 Stunden im Jahr unter 0,15, Minimum -0,30) werden auf -1 begrenzt; die
+    # Kostenrechnung nutzt trotzdem den echten Preis (logic/battery_env.py).
+    'PriceElectricPowerHighlyDynamic': (0.15, 0.35),
     'LowerSetp[1]': (280., 310.),                        # Komfortband: untere Grenze
     'UpperSetp[1]': (280., 310.),                         # Komfortband: obere Grenze
 }
@@ -70,7 +81,9 @@ def make_env(split='train', seed=0, reward_kwargs=None, battery_kwargs=None, sol
     battery/solar: False = die jeweilige Schicht weglassen (solar=True ohne battery=True
                   funktioniert, senkt dann aber die Kosten nur, wenn battery=True zusätzlich
                   den Netzbezug in der Beobachtung/im info-Dict bereitstellt).
-    scenario: BOPTEST-Preisszenario, Standard 'dynamic' (stündlich variierender Day-Ahead-Preis).
+    scenario: BOPTEST-Preisszenario, Standard 'highly_dynamic' (stündlicher Börsenpreis; 'dynamic'
+              wäre nur ein fester Tag/Nacht-Tarif mit 2,8 ct Unterschied). Die Preisgröße in
+              OBSERVATIONS muss zum Szenario passen.
     normalize: Beobachtungen auf [-1, 1] abbilden (logic/boptest_gym_env.py::
                NormalizedObservationWrapper). Aus nur für Modelle, die vor dieser Normierung
                trainiert wurden, oder zum Ansehen der Rohwerte.
@@ -79,7 +92,7 @@ def make_env(split='train', seed=0, reward_kwargs=None, battery_kwargs=None, sol
     reward_kwargs = reward_kwargs or {}
     battery_kwargs = battery_kwargs or {}
     solar_kwargs = solar_kwargs or {}
-    scenario = scenario or {'electricity_price': 'dynamic'}
+    scenario = scenario or {'electricity_price': 'highly_dynamic'}
 
     common = dict(url=url, testcase=testcase, actions=ACTIONS, observations=OBSERVATIONS,
                  predictive_period=PREDICTIVE_PERIOD, step_period=STEP_PERIOD, scenario=scenario)

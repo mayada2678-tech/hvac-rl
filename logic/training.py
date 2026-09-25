@@ -26,12 +26,13 @@ from stable_baselines3.common.callbacks import BaseCallback, EvalCallback
 from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.monitor import Monitor
 
-from logic.envs import make_env
+from logic.envs import ENV_VERSION, make_env
 from logic.live_control import anim_path_for, episodes_path_for, read_control, write_json
 from logic.reward import REWARD_PARTS
 from logic.watch import anim_state, write_anim_state
 
 ALGOS = {'SAC': SAC, 'TD3': TD3, 'PPO': PPO}
+KEEP_ALIVE_S = 300   # Lebenszeichen an ruhende BOPTEST-Tests, deutlich unter deren 15-min-Timeout
 
 
 class StopRequested(Exception):
@@ -72,6 +73,7 @@ class LiveCallback(BaseCallback):
         # aus der Testepisode.
         self.anim_path = anim_path_for(self.status_path) if self.status_path else None
         self._last_anim = 0.0
+        self._last_keep_alive = time.time()
         # Belohnung jeder Trainingsepisode (vom Monitor-Wrapper), für die blasse Linie in der
         # Lernkurve — erscheint viel früher als die erste Auswertung.
         self.episodes_path = episodes_path_for(self.csv_path) if self.csv_path else None
@@ -82,6 +84,22 @@ class LiveCallback(BaseCallback):
             return
         self._last_anim = now
         write_anim_state(self.anim_path, anim_state(info, phase, step, done=done, reward=reward))
+
+    def _keep_alive(self, *envs):
+        """BOPTEST beendet einen Test nach 15 min ohne Anfrage (BOPTEST_TIMEOUT=900 in
+        ../boptest/.env). Die Auswertungsumgebung ruht zwischen zwei Auswertungen oft länger
+        (2000 Schritte bei ~1,7 Schritten/s ≈ 20 min), in einer Pause auch die Trainingsumgebung —
+        die nächste Anfrage schlug dann mit KeyError 'payload' fehl. Alle 5 min eine harmlose
+        Anfrage (KPIs lesen) hält die Tests am Leben."""
+        now = time.time()
+        if now - self._last_keep_alive < KEEP_ALIVE_S:
+            return
+        self._last_keep_alive = now
+        for env in envs:
+            try:
+                env.unwrapped.get_kpis()
+            except Exception:   # nur ein Lebenszeichen — Fehler zeigen sich bei echter Nutzung
+                pass
 
     def _poll_control(self):
         if self.control_path is None:
@@ -121,12 +139,14 @@ class LiveCallback(BaseCallback):
                 if new:
                     f.write('timesteps,reward,length\n')
                 f.write(f"{self.num_timesteps},{float(episode['r'])},{int(episode['l'])}\n")
+        self._keep_alive(self.eval_env)
         ctrl = self._poll_control()
         if ctrl.get('stop'):
             self._write_status(phase='gestoppt', timesteps=self.num_timesteps)
             return False
         while ctrl.get('pause'):
             self._write_status(phase='pausiert', timesteps=self.num_timesteps)
+            self._keep_alive(self.eval_env, *getattr(self.training_env, 'envs', []))
             time.sleep(0.5)
             self._last_poll = time.time()
             self._ctrl = ctrl = read_control(self.control_path)
@@ -265,11 +285,11 @@ def _train(algo, cfg, seed, total_timesteps, env, eval_env, reward,
         model.save(Path('models') / name)
     # Belohnungsparameter neben dem Modell ablegen — damit logic/evaluation.py weiß, mit
     # welchem Komfortgewicht dieses Modell trainiert wurde (Kosten-Komfort-Vergleich).
-    # obs_normalized: mit normierten Beobachtungen trainiert (logic/envs.py, normalize=True) —
-    # ältere Modelle ohne das Feld bekommen beim Abspielen die Rohwerte, mit denen sie lernten.
+    # env_version: mit welcher Umgebung trainiert (logic/envs.py::ENV_VERSION) — ältere Modelle
+    # passen nicht mehr und werden beim Abspielen/Vergleichen ausgelassen.
     (Path('models') / f'{name}.json').write_text(json.dumps(
         {'algo': algo, 'seed': seed, 'reward': reward, 'timesteps': int(model.num_timesteps),
-         'obs_normalized': True}, indent=2))
+         'env_version': ENV_VERSION}, indent=2))
 
     if status_path:
         stopped = bool(control_path) and read_control(control_path).get('stop', False)

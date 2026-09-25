@@ -166,7 +166,7 @@ body.embedded .msgbox{min-height:0;padding:10px 14px}
     <h3>Technischer Hintergrund (bestest_hydronic_heat_pump)</h3>
     <dl>
       <dt>Beobachtung</dt>
-      <dd><code>reaTZon_y</code> Zonentemperatur, <code>TDryBul</code> Außentemperatur, <code>PriceElectricPowerDynamic</code> Strompreis, <code>LowerSetp[1]</code>/<code>UpperSetp[1]</code> Komfortband, dazu eigene Zustände <code>battery_soc</code> und <code>solar_power_kw</code></dd>
+      <dd><code>reaTZon_y</code> Zonentemperatur, <code>TDryBul</code> Außentemperatur, <code>PriceElectricPowerHighlyDynamic</code> Börsenstrompreis, <code>LowerSetp[1]</code>/<code>UpperSetp[1]</code> Komfortband, dazu eigene Zustände <code>battery_soc</code> und <code>solar_power_kw</code></dd>
       <dt>Aktion</dt>
       <dd><code>oveHeaPumY_u</code> ∈ [0, 1] — Wärmepumpen-Modulation, geht an BOPTEST · <code>battery_power_kw</code> ∈ [−3, 3] — Batterieleistung (positiv = laden), bleibt rein lokal in Python</dd>
       <dt>Solar</dt>

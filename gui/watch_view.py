@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QHBoxLayout, QLa
 from stable_baselines3 import PPO, SAC, TD3
 
 from logic.envs import STEP_PERIOD, TEST_START
-from logic.evaluation import obs_normalized
+from logic.evaluation import env_compatible
 from logic.watch import record
 
 ANIM_PAGE = Path(__file__).resolve().parent.parent / 'web' / 'hvac-agent-animation.html'
@@ -123,6 +123,13 @@ class WatchView(QWidget):
         self.reload_btn.clicked.connect(self.reload_models)
         top.addWidget(self.reload_btn)
         layout.addLayout(top)
+        # Modelle aus einer älteren Umgebung (andere Beobachtungen/anderer Preis) — nicht
+        # anbieten, aber sagen, dass es sie gibt.
+        self.skipped_label = QLabel()
+        self.skipped_label.setWordWrap(True)
+        self.skipped_label.setStyleSheet('color: #9d9d9d;')
+        self.skipped_label.hide()
+        layout.addWidget(self.skipped_label)
 
         controls = QHBoxLayout()
         self.play_btn = QPushButton('▶ Abspielen')
@@ -167,7 +174,12 @@ class WatchView(QWidget):
 
     def reload_models(self):
         """Neu einlesen, z. B. nachdem ein Training gerade ein Modell gesichert hat."""
-        models = sorted(p.stem for p in self.models_dir.glob('*.zip')) if self.models_dir.exists() else []
+        paths = sorted(self.models_dir.glob('*.zip')) if self.models_dir.exists() else []
+        models = [p.stem for p in paths if env_compatible(p)]
+        skipped = [p.stem for p in paths if p.stem not in models]
+        self.skipped_label.setText(f'Ausgeblendet (mit älterer Umgebung trainiert, bitte neu trainieren): '
+                                   f'{", ".join(skipped)}')
+        self.skipped_label.setVisible(bool(skipped))
         previously = {i.text() for i in self.strategy_list.selectedItems()}
         self.strategy_list.blockSignals(True)
         self.strategy_list.clear()
@@ -191,9 +203,7 @@ class WatchView(QWidget):
         if name == 'Regel (RBC)':
             result = record('rbc')
         else:
-            path = self.models_dir / f'{name}.zip'
-            result = record(ALGOS[name.split('_')[0]].load(str(self.models_dir / name)),
-                            normalize=obs_normalized(path))
+            result = record(ALGOS[name.split('_')[0]].load(str(self.models_dir / name)))
         self._cache[key] = result
         return result
 
