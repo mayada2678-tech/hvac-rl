@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QHBoxLayout, QLa
 from stable_baselines3 import PPO, SAC, TD3
 
 from logic.envs import STEP_PERIOD, TEST_START
+from logic.evaluation import obs_normalized
 from logic.watch import record
 
 ANIM_PAGE = Path(__file__).resolve().parent.parent / 'web' / 'hvac-agent-animation.html'
@@ -190,7 +191,9 @@ class WatchView(QWidget):
         if name == 'Regel (RBC)':
             result = record('rbc')
         else:
-            result = record(ALGOS[name.split('_')[0]].load(str(self.models_dir / name)))
+            path = self.models_dir / f'{name}.zip'
+            result = record(ALGOS[name.split('_')[0]].load(str(self.models_dir / name)),
+                            normalize=obs_normalized(path))
         self._cache[key] = result
         return result
 

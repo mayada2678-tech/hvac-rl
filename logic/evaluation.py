@@ -55,9 +55,10 @@ BOPTEST_KPIS = ['ener_tot', 'emis_tot', 'pele_tot', 'pgas_tot', 'pdih_tot', 'idi
 def run_episode(policy) -> dict:
     """Eine Testepisode. policy: 'rbc' oder Pfad zu einem Modell (ohne .zip). Ergebnis:
     BOPTESTs KPIs plus cost_eur (Kosten inkl. Batterie/PV) und grid_kwh (Netzbezug)."""
-    env = make_env('test')
+    is_rbc = isinstance(policy, str) and policy == 'rbc'
+    env = make_env('test', normalize=is_rbc or obs_normalized(Path(policy).with_suffix('.zip')))
     try:
-        if isinstance(policy, str) and policy == 'rbc':
+        if is_rbc:
             agent = build('rbc', env)
             act = lambda obs: agent.predict(obs)[0]  # noqa: E731
         else:
@@ -94,6 +95,15 @@ def model_meta(model_zip: Path) -> dict:
         return json.loads(meta_path.read_text())
     except (OSError, ValueError):
         return {}
+
+
+def obs_normalized(model_zip: Path) -> bool:
+    """Wurde das Modell mit normierten Beobachtungen trainiert? Steht in den Metadaten
+    (models/<name>.json, auch für <name>_final.zip); fehlt das Feld, ist es ein älteres
+    Modell, das die Rohwerte gesehen hat."""
+    model_zip = Path(model_zip)
+    stem = model_zip.stem.removesuffix('_final')
+    return bool(model_meta(model_zip.with_name(stem + '.zip')).get('obs_normalized', False))
 
 
 def comparable_models(models_dir: Path) -> list[Path]:

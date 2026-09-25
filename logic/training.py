@@ -265,8 +265,11 @@ def _train(algo, cfg, seed, total_timesteps, env, eval_env, reward,
         model.save(Path('models') / name)
     # Belohnungsparameter neben dem Modell ablegen — damit logic/evaluation.py weiß, mit
     # welchem Komfortgewicht dieses Modell trainiert wurde (Kosten-Komfort-Vergleich).
+    # obs_normalized: mit normierten Beobachtungen trainiert (logic/envs.py, normalize=True) —
+    # ältere Modelle ohne das Feld bekommen beim Abspielen die Rohwerte, mit denen sie lernten.
     (Path('models') / f'{name}.json').write_text(json.dumps(
-        {'algo': algo, 'seed': seed, 'reward': reward, 'timesteps': int(model.num_timesteps)}, indent=2))
+        {'algo': algo, 'seed': seed, 'reward': reward, 'timesteps': int(model.num_timesteps),
+         'obs_normalized': True}, indent=2))
 
     if status_path:
         stopped = bool(control_path) and read_control(control_path).get('stop', False)

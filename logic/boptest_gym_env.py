@@ -266,11 +266,24 @@ class HVACReward(BoptestGymEnv):
 
 
 class NormalizedObservationWrapper(gym.ObservationWrapper):
-    """Normalisiert Beobachtungen auf [-1, 1] — hilft SB3-Algorithmen beim Konvergieren."""
+    """Normalisiert Beobachtungen auf [-1, 1] — hilft SB3-Algorithmen beim Konvergieren.
+
+    Ohne das sieht das Netz Werte zwischen ~0,2 (Preis) und ~600 000 (`time` in Sekunden der
+    Woche) nebeneinander; die großen Eingänge überdecken den Preis und sättigen die Ausgabe
+    (Aktion klebt an einem Rand). Grenzen = die des inneren Beobachtungsraums (siehe
+    logic/envs.py::OBSERVATIONS, Batterie-/PV-Schicht); Werte außerhalb werden auf ±1 begrenzt."""
+
+    def __init__(self, env):
+        super().__init__(env)
+        self._low = env.observation_space.low.astype(np.float64)
+        span = env.observation_space.high.astype(np.float64) - self._low
+        self._span = np.where(span > 0, span, 1.0)   # Grenzen gleich -> nicht durch 0 teilen
+        self.observation_space = spaces.Box(low=-1.0, high=1.0, shape=env.observation_space.shape,
+                                            dtype=np.float32)
 
     def observation(self, observation):
-        return 2 * (observation - self.observation_space.low) / \
-            (self.observation_space.high - self.observation_space.low) - 1
+        scaled = 2 * (np.asarray(observation, dtype=np.float64) - self._low) / self._span - 1
+        return np.clip(scaled, -1.0, 1.0).astype(np.float32)
 
 
 class NormalizedActionWrapper(gym.ActionWrapper):

@@ -13,7 +13,7 @@ Python-Prozess selbst.
 import random
 
 from logic.battery_env import BatteryEnv
-from logic.boptest_gym_env import BoptestGymEnv
+from logic.boptest_gym_env import BoptestGymEnv, NormalizedObservationWrapper
 from logic.reward import RewardWrapper
 from logic.solar_env import SolarEnv
 
@@ -57,7 +57,7 @@ TRAIN_WARMUP = 24 * 3600               # 1 Tag Einschwingzeit pro Trainingsepiso
 
 
 def make_env(split='train', seed=0, reward_kwargs=None, battery_kwargs=None, solar_kwargs=None,
-            battery=True, solar=True, url=URL, testcase=TESTCASE, scenario=None):
+            battery=True, solar=True, url=URL, testcase=TESTCASE, scenario=None, normalize=True):
     """BOPTEST-Gymnasium-Umgebung, standardmäßig mit Batterie + PV-Anlage (siehe
     logic/battery_env.py, logic/solar_env.py), außen herum immer die Belohnungsfunktion
     (logic/reward.py::RewardWrapper).
@@ -71,6 +71,9 @@ def make_env(split='train', seed=0, reward_kwargs=None, battery_kwargs=None, sol
                   funktioniert, senkt dann aber die Kosten nur, wenn battery=True zusätzlich
                   den Netzbezug in der Beobachtung/im info-Dict bereitstellt).
     scenario: BOPTEST-Preisszenario, Standard 'dynamic' (stündlich variierender Day-Ahead-Preis).
+    normalize: Beobachtungen auf [-1, 1] abbilden (logic/boptest_gym_env.py::
+               NormalizedObservationWrapper). Aus nur für Modelle, die vor dieser Normierung
+               trainiert wurden, oder zum Ansehen der Rohwerte.
     """
     random.seed(seed)
     reward_kwargs = reward_kwargs or {}
@@ -92,4 +95,6 @@ def make_env(split='train', seed=0, reward_kwargs=None, battery_kwargs=None, sol
         env = BatteryEnv(env, **battery_kwargs)
     if solar:
         env = SolarEnv(env, **solar_kwargs)
+    if normalize:   # nach Batterie/PV, damit auch SOC und Solarleistung normiert werden
+        env = NormalizedObservationWrapper(env)
     return RewardWrapper(env, **reward_kwargs)
