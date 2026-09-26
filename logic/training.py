@@ -14,8 +14,10 @@ Live-Lernkurve und Fernsteuerung (Pause/Stopp) über drei zusätzliche Dateipfad
 der Oberfläche erzeugte *.run.json (beides gültiges YAML — siehe logic/live_control.py).
 """
 import argparse
+import contextlib
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -33,6 +35,25 @@ from logic.watch import anim_state, write_anim_state
 
 ALGOS = {'SAC': SAC, 'TD3': TD3, 'PPO': PPO}
 KEEP_ALIVE_S = 300   # Lebenszeichen an ruhende BOPTEST-Tests, deutlich unter deren 15-min-Timeout
+
+
+@contextlib.contextmanager
+def keep_system_awake():
+    """Windows während des Trainings nicht in den Standby schicken. Im Standby wird dieser
+    Prozess angehalten, BOPTEST in Docker läuft aber weiter und löscht die ruhenden Tests nach
+    15 min (BOPTEST_TIMEOUT) — nach dem Aufwachen brach das Training mit KeyError 'payload' ab
+    (so passiert am 25.09.2026, Standby 20:32-20:48). Der Bildschirm darf trotzdem ausgehen;
+    Deckel zuklappen/Ein-Aus-Taste schickt den Rechner weiterhin schlafen."""
+    if sys.platform != 'win32':
+        yield
+        return
+    import ctypes
+    ES_CONTINUOUS, ES_SYSTEM_REQUIRED = 0x80000000, 0x00000001
+    ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
+    try:
+        yield
+    finally:
+        ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
 
 
 class StopRequested(Exception):
@@ -270,7 +291,8 @@ def _train(algo, cfg, seed, total_timesteps, env, eval_env, reward,
         callback = EvalCallback(eval_env, eval_freq=cfg.get('eval_freq', 5000), n_eval_episodes=1,
                                 deterministic=True, verbose=0, best_model_save_path=str(ckpt_dir))
 
-    model.learn(total_timesteps=total_timesteps, callback=callback, tb_log_name=name)
+    with keep_system_awake():
+        model.learn(total_timesteps=total_timesteps, callback=callback, tb_log_name=name)
 
     # Endstand sichern; falls es ein besseres Zwischenmodell laut Eval gab, wird das zum
     # eigentlichen Modell für logic/evaluation.py bzw. die "Agent beobachten"-Ansicht.
