@@ -16,7 +16,7 @@ class MainWindow(QMainWindow):
         tabs = QTabWidget()
         self.agent_view = AgentView(root)
         tabs.addTab(self.agent_view, '🤖 Agent')
-        tabs.addTab(DatasetView(), '📊 Datensatz')
+        tabs.addTab(DatasetView(can_run=self.agent_view._compare_allowed), '📊 Datensatz')
         self.setCentralWidget(tabs)
 
     def closeEvent(self, event):

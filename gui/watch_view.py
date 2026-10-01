@@ -16,8 +16,7 @@ import pandas as pd
 import requests
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
-from PySide6.QtCore import Qt, QTimer, QUrl
-from PySide6.QtWebEngineWidgets import QWebEngineView
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QHBoxLayout, QLabel, QListWidget,
                                QListWidgetItem, QPushButton, QSlider, QTableWidget,
                                QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
@@ -26,8 +25,8 @@ from stable_baselines3 import PPO, SAC, TD3
 from logic.envs import STEP_PERIOD, TEST_START
 from logic.evaluation import env_compatible
 from logic.watch import record
+from gui.anim_grid import AnimGrid
 
-ANIM_PAGE = Path(__file__).resolve().parent.parent / 'web' / 'hvac-agent-animation.html'
 
 ALGOS = {'sac': SAC, 'td3': TD3, 'ppo': PPO}
 # Feste Farbzuordnung je Strategie (kategorial, nach Auswahlreihenfolge vergeben, nie nach
@@ -99,9 +98,13 @@ class WatchView(QWidget):
     """Strategien wählen (RBC + trainierte Modelle), die Testperiode abspielen oder per
     Regler durchblättern."""
 
-    def __init__(self, models_dir: Path, parent=None):
+    def __init__(self, models_dir: Path, parent=None, can_run=None):
+        """can_run: () -> (bool, Begründung) — ob gerade ein BOPTEST-Worker für eine Simulation
+        frei ist (gui/agent_view.py::_compare_allowed)."""
         super().__init__(parent)
         self.models_dir = Path(models_dir)
+        self._can_run = can_run
+        self._active = False   # erst simulieren, wenn der Reiter geöffnet wird (activate())
         self._cache: dict[tuple[str, float], tuple[pd.DataFrame, dict]] = {}
         self._runs: dict[str, pd.DataFrame] = {}
         self._kpis: dict[str, dict] = {}
@@ -159,18 +162,19 @@ class WatchView(QWidget):
         self.canvas.setMinimumHeight(580)
         self.view_tabs = QTabWidget()
         self.view_tabs.addTab(self.canvas, 'Diagramme')
-        self.anim_view = QWebEngineView()
-        url = QUrl.fromLocalFile(str(ANIM_PAGE))
-        url.setQuery('embedded=1')
-        self.anim_view.loadFinished.connect(lambda _ok: self._push_anim_state())
-        self.anim_view.setUrl(url)
-        self.view_tabs.addTab(self.anim_view, 'Animation')
+        self.anim_grid = AnimGrid()   # je gewählter Strategie eine Animation, nebeneinander
+        self.view_tabs.addTab(self.anim_grid, 'Animation')
         layout.addWidget(self.view_tabs, 1)
 
         layout.addWidget(QLabel('Kennzahlen (BOPTEST-KPIs auf der Testperiode):'))
         self.kpi_table = QTableWidget()
         self.kpi_table.setMaximumHeight(120)
         layout.addWidget(self.kpi_table)
+
+    def activate(self):
+        """Der Reiter wird angesehen: Modelle neu einlesen und jetzt auch simulieren."""
+        self._active = True
+        self.reload_models()
 
     def reload_models(self):
         """Neu einlesen, z. B. nachdem ein Training gerade ein Modell gesichert hat."""
@@ -192,12 +196,15 @@ class WatchView(QWidget):
         self.strategy_list.blockSignals(False)
         self._on_selection_changed()
 
-    def _load(self, name: str) -> tuple[pd.DataFrame, dict]:
+    def _cache_key(self, name: str) -> tuple[str, float]:
         mtime = 0.0
         if name != 'Regel (RBC)':
             path = self.models_dir / f'{name}.zip'
             mtime = path.stat().st_mtime if path.exists() else 0.0
-        key = (name, mtime)
+        return name, mtime
+
+    def _load(self, name: str) -> tuple[pd.DataFrame, dict]:
+        key = self._cache_key(name)
         if key in self._cache:
             return self._cache[key]
         if name == 'Regel (RBC)':
@@ -224,6 +231,21 @@ class WatchView(QWidget):
             self.kpi_table.setRowCount(0)
             self.status_label.setText('Mindestens eine Strategie auswählen.')
             return
+
+        # Simulieren blockiert die Oberfläche, bis BOPTEST einen Worker frei hat — deshalb erst,
+        # wenn der Reiter wirklich angesehen wird (activate()), und nie, wenn alle Worker belegt
+        # sind (sonst friert die App ein, im schlimmsten Fall schon beim Start).
+        missing = [n for n in chosen if self._cache_key(n) not in self._cache]
+        if missing and not self._active:
+            self.status_label.setText('Die Testperiode wird simuliert, sobald dieser Reiter geöffnet wird.')
+            return
+        if missing and self._can_run is not None:
+            ok, why = self._can_run()
+            if not ok:
+                self.figure.clear()
+                self.canvas.draw_idle()
+                self.status_label.setText(f'⏳ {why}')
+                return
 
         self.status_label.setText('Simuliere Testperiode …')
         QApplication.setOverrideCursor(Qt.WaitCursor)
@@ -358,12 +380,16 @@ class WatchView(QWidget):
         self._push_anim_state()
 
     def _push_anim_state(self):
-        """Zustand der aktuellen Stunde an die eingebettete Animation geben — für die zuletzt
-        gewählte Strategie, wie die Belohnungsbalken. Feldnamen wie in
-        logic/watch.py::record()s anim_state.json, damit dieselbe Seite beides kann."""
-        if not self._runs:
-            return
-        name = list(self._runs)[-1]
+        """Zustand der aktuellen Stunde an die Animationen geben — je gewählter Strategie eine,
+        nebeneinander, in denselben Farben wie die Diagrammlinien."""
+        chosen = list(self._runs)
+        self.anim_grid.set_names(chosen, {n: self._color(n, chosen) for n in chosen})
+        for name in chosen:
+            self.anim_grid.push(name, self._anim_state(name))
+
+    def _anim_state(self, name: str) -> dict:
+        """Zustand einer Strategie zur aktuellen Stunde. Feldnamen wie in
+        logic/watch.py::anim_state(), damit dieselbe Seite beides kann."""
         d = self._runs[name]
         i = min(max(self.hour_slider.value(), 1), len(d)) - 1
         r = d.iloc[i]
@@ -382,10 +408,9 @@ class WatchView(QWidget):
             'reward': g('reward'), 'updated': i,
         }
         clean = lambda v: None if isinstance(v, float) and not math.isfinite(v) else v
-        state = {k: ([clean(float(x)) for x in v] if isinstance(v, list) else
-                     clean(float(v)) if isinstance(v, (int, float, np.number)) and not isinstance(v, bool) else v)
-                 for k, v in state.items()}
-        self.anim_view.page().runJavaScript(f'window.applyState && window.applyState({json.dumps(state)})')
+        return {k: ([clean(float(x)) for x in v] if isinstance(v, list) else
+                    clean(float(v)) if isinstance(v, (int, float, np.number)) and not isinstance(v, bool) else v)
+                for k, v in state.items()}
 
     def _draw_reward_parts(self, ax, name: str, upto: int):
         d = self._runs[name].iloc[:upto]

@@ -22,9 +22,9 @@ import pandas as pd
 import psutil
 import requests
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.colors import to_hex
 from matplotlib.figure import Figure
-from PySide6.QtCore import Qt, QTimer, QUrl
-from PySide6.QtWebEngineWidgets import QWebEngineView
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QDoubleSpinBox, QFormLayout, QGroupBox,
                                QHBoxLayout, QLabel, QLineEdit, QMessageBox, QProgressDialog, QPushButton,
                                QRadioButton, QScrollArea, QSpinBox, QSplitter, QTabWidget, QVBoxLayout,
@@ -36,7 +36,8 @@ from logic.live_control import (ALGOS, MAX_PARALLEL_TRAININGS, RECOMMENDED, anim
                                 write_json)
 from gui.compare_view import CompareView
 from gui.reward_form import RewardForm
-from gui.watch_view import ANIM_PAGE, WatchView, plot_reward_parts
+from gui.anim_grid import AnimGrid
+from gui.watch_view import WatchView, plot_reward_parts
 
 # Länge der Testperiode in Regelschritten (72 h) — Trainingsepisoden werden auf diese Länge
 # umgerechnet, damit sie mit den Auswertungen auf einer Skala liegen.
@@ -324,30 +325,28 @@ class AgentView(QWidget):
         train_layout.addWidget(self.status_label)
         self.figure = Figure(figsize=(7, 4), constrained_layout=True)
         self.canvas = FigureCanvas(self.figure)
-        # Oben die Animation des laufenden Trainings, unten die Lernkurve — beide gleichzeitig,
-        # Trennlinie verschiebbar.
-        self.train_anim = QWebEngineView()
-        anim_url = QUrl.fromLocalFile(str(ANIM_PAGE))
-        anim_url.setQuery('embedded=1')
-        self.train_anim.setUrl(anim_url)
-        self.train_anim.loadFinished.connect(lambda _ok: self._push_train_anim(force=True))
-        self._anim_sent = None
+        # Oben je laufendem Training eine Animation (nebeneinander, Farbe wie seine Lernkurve),
+        # unten die Lernkurve — beide gleichzeitig, Trennlinie verschiebbar.
+        self.train_anim = AnimGrid()
+        self._anim_sent: dict[str, str] = {}
         splitter = QSplitter(Qt.Vertical)
         splitter.addWidget(self.train_anim)
         splitter.addWidget(self.canvas)
-        splitter.setSizes([420, 480])
+        splitter.setSizes([550, 450])   # Verhältnis; der Teiler lässt sich mit der Maus verschieben
         train_layout.addWidget(splitter, 1)
         self.anim_timer = QTimer(self)
         self.anim_timer.timeout.connect(self._push_train_anim)
         self.anim_timer.start(600)
         sub_tabs.addTab(train_tab, 'Training')
 
-        self.watch_view = WatchView(self.models_dir)
+        self.watch_view = WatchView(self.models_dir, can_run=self._compare_allowed)
         sub_tabs.addTab(self.watch_view, 'Beobachten')
         self.compare_view = CompareView(self.models_dir, self.root / 'results' / 'compare.csv',
                                         can_run=self._compare_allowed, start_study=self.start_study)
         sub_tabs.addTab(self.compare_view, 'Vergleich')
-        sub_tabs.currentChanged.connect(lambda i: i == 1 and self.watch_view.reload_models())
+        # "Beobachten" simuliert erst, wenn der Reiter geöffnet wird — sonst hinge der App-Start an
+        # einer Simulation (und bei belegten Workern für Stunden).
+        sub_tabs.currentChanged.connect(lambda i: i == 1 and self.watch_view.activate())
 
         outer.addWidget(left)
         outer.addWidget(sub_tabs, 1)
@@ -609,25 +608,29 @@ class AgentView(QWidget):
         eta = 'unter 1 min' if minutes < 1 else f'ca. {minutes:.0f} min'
         return f'{target} — noch {eta} ({rate:.1f} Schritte/s)'
 
-    def _push_train_anim(self, force: bool = False):
-        """Neuesten Animationszustand des laufenden (sonst zuletzt gestarteten) Laufs an die
-        Animation oben im Training-Reiter geben — geschrieben von
+    def _push_train_anim(self):
+        """Je laufendem Training (sonst je gestartetem Lauf) eine Animation oben im
+        Training-Reiter mit dessen neuestem Zustand füttern — geschrieben von
         logic/training.py::LiveCallback, beim Training wie bei den Auswertungen."""
         jobs = getattr(self, 'jobs', {})
-        candidates = list(self._running_jobs().values()) or [j for j in jobs.values() if not j.get('queued')]
-        if not candidates:
-            return
-        job = candidates[-1]
-        try:
-            text = anim_path_for(job['paths']['status']).read_text(encoding='utf-8')
-            state = json.loads(text)
-        except (OSError, ValueError):   # noch nichts geschrieben oder gerade ersetzt
-            return
-        if not force and text == self._anim_sent:
-            return
-        self._anim_sent = text
-        state['strategy'] = f"{job['label']} · {state.get('strategy', '')}"
-        self.train_anim.page().runJavaScript(f'window.applyState && window.applyState({json.dumps(state)})')
+        running = self._running_jobs()
+        shown = {k: j for k, j in jobs.items() if k in running} or \
+                {k: j for k, j in jobs.items() if not j.get('queued')}
+        names = {k: f"{j['label']} · seed {j['seed']}" for k, j in shown.items()}
+        # gleiche Farbe wie die Lernkurve dieses Laufs (_refresh_panel: C<Index in self.jobs>)
+        colors = {names[k]: to_hex(f'C{list(jobs).index(k) % 10}') for k in shown}
+        self.train_anim.set_names(list(names.values()), colors)
+        for key, job in shown.items():
+            try:
+                text = anim_path_for(job['paths']['status']).read_text(encoding='utf-8')
+                state = json.loads(text)
+            except (OSError, ValueError):   # noch nichts geschrieben oder gerade ersetzt
+                continue
+            if text == self._anim_sent.get(key):
+                continue
+            self._anim_sent[key] = text
+            state['strategy'] = f"{job['label']} · {state.get('strategy', '')}"
+            self.train_anim.push(names[key], state)
 
     def _refresh_panel(self):
         self._start_queued()

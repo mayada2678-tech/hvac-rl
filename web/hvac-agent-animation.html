@@ -119,10 +119,17 @@ body.embedded{--paper:#1e1e1e;--surface:#252526;--line:#3c3c3c}
 body.embedded .wrap{max-width:none;padding:10px 12px 12px}
 body.embedded h1, body.embedded .lead, body.embedded .note, body.embedded .tech,
 body.embedded .foot, body.embedded .controls, body.embedded .legend{display:none}
-body.embedded .stage{padding:12px 16px}
-/* Szene auf die Höhe des App-Bereichs begrenzen (Seitenverhältnis bleibt) — kein Scrollen. */
-body.embedded svg#scene{max-height:calc(100vh - 190px);margin:8px 0 4px}
-body.embedded .msgbox{min-height:0;padding:10px 14px}
+/* Ganze Höhe des App-Bereichs nutzen: Kopfzeile und Nachricht fest, die Szene bekommt den
+   ganzen Rest (Seitenverhältnis bleibt, zentriert) — wächst/schrumpft mit dem Teiler, nie Scrollen. */
+body.embedded{height:100vh;overflow:hidden}
+body.embedded .wrap{height:100vh;display:flex;flex-direction:column;padding:8px 10px}
+body.embedded .stage{flex:1;min-height:0;display:flex;flex-direction:column;padding:10px 14px}
+body.embedded svg#scene{flex:1;min-height:0;height:0;width:100%;margin:6px 0 4px}
+body.embedded .msgbox{min-height:0;padding:8px 14px;flex:none}
+body.embedded .status{flex:none;margin-bottom:0}
+body.embedded .time{font-size:1.15rem}
+body.embedded .pricepill{padding:3px 12px;font-size:.88rem}
+body.embedded .msgbox p{font-size:.9rem}
 </style>
 </head>
 <body>

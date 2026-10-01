@@ -13,7 +13,9 @@ gesehenen Testperiode.
 
 ## Voraussetzungen
 
-- Python 3.11 (siehe `.venv311`), `pip install -r requirements.txt`
+- Python 3.11 (nicht 3.14 — `numpy==1.26.4` gibt es dafür nicht), Umgebung `.venv`:
+  `py -3.11 -m venv .venv`, dann `.venv\Scripts\python.exe -m pip install -r requirements.txt`.
+  App starten: `.venv\Scripts\python.exe app.py`
 - [Docker Desktop](https://docs.docker.com/get-docker/) — BOPTEST läuft als eigener
   Docker-Dienst (REST-API), nicht als Python-Bibliothek wie zuvor CityLearn.
 

@@ -9,7 +9,7 @@ import pandas as pd
 import requests
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QCursor
 from PySide6.QtWidgets import (QApplication, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel,
                                QMessageBox, QPushButton, QSlider, QTableWidget, QTableWidgetItem,
@@ -24,13 +24,25 @@ FALLBACK_PALETTE = ['#4FC1FF', '#4EC9B0', '#DCDCAA', '#F48771', '#9CDCFE', '#C58
 
 
 class DatasetView(QWidget):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, can_run=None):
+        """can_run: () -> (bool, Begründung) — ob gerade ein BOPTEST-Worker frei ist
+        (gui/agent_view.py::_compare_allowed)."""
         super().__init__(parent)
         self._df = None
         self._measurements = self._forecasts = self._inputs = {}
+        self._can_run = can_run
+        self._loaded = False
         self._build_ui()
         self._load_testcase_list()
-        self.reload()
+        # Das Jahr erst laden, wenn die Seite zum ersten Mal gezeigt wird (showEvent): Laden
+        # braucht einen BOPTEST-Worker und blockiert bis dahin — beim App-Start hätte das das
+        # ganze Fenster aufgehalten, bei belegten Workern bis zum Ende der Trainings.
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._loaded:
+            self._loaded = True
+            QTimer.singleShot(0, self.reload)   # erst die Seite zeichnen, dann laden
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
@@ -76,6 +88,12 @@ class DatasetView(QWidget):
     def reload(self):
         testcase = self._current_testcase()
         self.error_label.setText('')
+        if self._can_run is not None:
+            ok, why = self._can_run()
+            if not ok:
+                self._loaded = False   # beim nächsten Öffnen der Seite erneut versuchen
+                self.error_label.setText(f'⏳ {why} Danach „🔄 Laden“ drücken.')
+                return
         QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
         try:
             self._df = load_year(testcase)

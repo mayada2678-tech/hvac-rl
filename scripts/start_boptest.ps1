@@ -60,6 +60,13 @@ Push-Location $BoptestDir
 try {
     docker compose up --scale worker=$Workers web worker provision --build -d
     if ($LASTEXITCODE -ne 0) { throw "docker compose up fehlgeschlagen." }
+    # Nach einem Neustart von Docker Desktop (Rechner-Neustart, Standby, Update) sonst alle mit
+    # Exit 255 aus -> "Verbindung verweigert" in der App. "unless-stopped" startet die dauerhaften
+    # Dienste automatisch mit Docker wieder; stop_boptest.ps1 (docker compose down) entfernt die
+    # Container, dann bleiben sie aus. Nicht für provision/mc: die laufen nur einmal und würden
+    # sonst endlos neu gestartet.
+    $ids = docker compose ps -q web worker redis minio
+    if ($ids) { docker update --restart unless-stopped $ids | Out-Null }
 } finally {
     Pop-Location
 }
